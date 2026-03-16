@@ -5,12 +5,26 @@ Translates from OpenAI's `/v1/chat/completions` to DashScope's `/v1/chat/complet
 from typing import Any, Coroutine, List, Literal, Optional, Tuple, Union, overload
 
 from litellm.secret_managers.main import get_secret_str
-from litellm.types.llms.openai import AllMessageValues
+from litellm.types.llms.openai import AllMessageValues, ChatCompletionToolParam
 
 from ...openai.chat.gpt_transformation import OpenAIGPTConfig
 
 
 class DashScopeChatConfig(OpenAIGPTConfig):
+    def remove_cache_control_flag_from_messages_and_tools(
+        self,
+        model: str,
+        messages: List[AllMessageValues],
+        tools: Optional[List[ChatCompletionToolParam]] = None,
+    ) -> Tuple[List[AllMessageValues], Optional[List[ChatCompletionToolParam]]]:
+        """
+        Preserve cache_control for DashScope (pass-through).
+        DashScope compatible-mode accepts OpenAI-style requests; unknown fields
+        are typically ignored. If the API adds prompt caching support, this allows
+        cache_control to take effect without code changes.
+        """
+        return messages, tools
+
     @overload
     def _transform_messages(
         self, messages: List[AllMessageValues], model: str, is_async: Literal[True]
