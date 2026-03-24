@@ -7278,6 +7278,7 @@ def stream_chunk_builder(  # noqa: PLR0915
                 or delta.get("function_call") is not None
                 or delta.get("reasoning_content") is not None
                 or delta.get("thinking_blocks") is not None
+                or delta.get("reasoning_details") is not None
                 or delta.get("annotations") is not None
                 or delta.get("audio") is not None
                 or delta.get("images") is not None
@@ -7392,6 +7393,30 @@ def stream_chunk_builder(  # noqa: PLR0915
             response["choices"][0]["message"]["reasoning_content"] = (
                 processor.get_combined_reasoning_content(reasoning_chunks)
             )
+
+        # 取最后一帧非空的 reasoning_details（例如 signature 仅在流式末帧出现）
+        last_reasoning_details: Optional[Any] = None
+        for _chunk in chunks:
+            if len(_chunk["choices"]) == 0:
+                continue
+            _choice0 = _chunk["choices"][0]
+            _delta_obj = (
+                _choice0.get("delta", {})
+                if isinstance(_choice0, dict)
+                else getattr(_choice0, "delta", {})
+            )
+            if isinstance(_delta_obj, dict):
+                _d = _delta_obj
+            elif hasattr(_delta_obj, "model_dump"):
+                _d = cast(Dict[str, Any], _delta_obj.model_dump())
+            else:
+                _d = {}
+            _rd = _d.get("reasoning_details")
+            if _rd is not None:
+                last_reasoning_details = _rd
+        if last_reasoning_details is not None:
+            _msg = cast(Choices, response.choices[0]).message
+            setattr(_msg, "reasoning_details", last_reasoning_details)
 
         annotation_chunks = [
             chunk

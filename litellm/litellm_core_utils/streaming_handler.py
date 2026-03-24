@@ -722,6 +722,20 @@ class CustomStreamWrapper:
             is_empty = False
         elif delta.function_call is not None:
             is_empty = False
+        elif getattr(delta, "reasoning_content", None):
+            is_empty = False
+        elif getattr(delta, "thinking_blocks", None) is not None:
+            is_empty = False
+        elif getattr(delta, "reasoning_details", None) is not None:
+            is_empty = False
+        elif getattr(delta, "annotations", None) is not None:
+            is_empty = False
+        elif getattr(delta, "provider_specific_fields", None) is not None:
+            is_empty = False
+        elif getattr(delta, "audio", None) is not None:
+            is_empty = False
+        elif getattr(delta, "images", None) is not None:
+            is_empty = False
         return is_empty
 
     def set_model_id(
@@ -807,6 +821,16 @@ class CustomStreamWrapper:
             or (
                 "annotations" in model_response.choices[0].delta
                 and model_response.choices[0].delta.annotations is not None
+            )
+            or (
+                getattr(
+                    model_response.choices[0].delta, "reasoning_details", None
+                )
+                is not None
+            )
+            or (
+                getattr(model_response.choices[0].delta, "thinking_blocks", None)
+                is not None
             )
         ):
             return True
@@ -908,16 +932,86 @@ class CustomStreamWrapper:
                     delta, model_response.choices[0].delta, attribute
                 )
 
+    def _finalize_stream_chunk_from_original_openai(
+        self,
+        completion_obj: Dict[str, Any],
+        model_response: ModelResponseStream,
+        response_obj: Dict[str, Any],
+    ) -> Optional[ModelResponseStream]:
+        """
+        从 original_chunk 构建要下发的流式 chunk，保留 reasoning_details、signature 等上游字段。
+        """
+        from litellm.litellm_core_utils.core_helpers import (
+            preserve_upstream_non_openai_attributes,
+        )
+
+        self.safety_checker()
+        hold, model_response_str = self.check_special_tokens(
+            chunk=completion_obj["content"],
+            finish_reason=model_response.choices[0].finish_reason,
+        )
+        if hold is True:
+            return None
+        original_chunk = response_obj.get("original_chunk", None)
+        if original_chunk:
+            if len(original_chunk.choices) > 0:
+                choices = []
+                for choice in original_chunk.choices:
+                    try:
+                        if isinstance(choice, BaseModel):
+                            choice_json = choice.model_dump()  # type: ignore
+                            choice_json.pop(
+                                "finish_reason", None
+                            )  # for mistral etc. which return a value in their last chunk (not-openai compatible).
+                            choices.append(StreamingChoices(**choice_json))
+                    except Exception:
+                        choices.append(StreamingChoices())
+                setattr(model_response, "choices", choices)
+            else:
+                return None
+            model_response.system_fingerprint = original_chunk.system_fingerprint
+            setattr(
+                model_response,
+                "citations",
+                getattr(original_chunk, "citations", None),
+            )
+            preserve_upstream_non_openai_attributes(
+                model_response=model_response,
+                original_chunk=original_chunk,
+            )
+
+            model_response = self.strip_role_from_delta(model_response)
+            if verbose_logger.isEnabledFor(logging.DEBUG):
+                verbose_logger.debug(
+                    "model_response.choices[0].delta: %s",
+                    model_response.choices[0].delta,
+                )
+        else:
+            completion_obj["content"] = model_response_str
+            if self.sent_first_chunk is False:
+                completion_obj["role"] = "assistant"
+                self.sent_first_chunk = True
+            if response_obj.get("provider_specific_fields") is not None:
+                completion_obj["provider_specific_fields"] = response_obj[
+                    "provider_specific_fields"
+                ]
+            model_response.choices[0].delta = Delta(**completion_obj)
+            _index: Optional[int] = completion_obj.get("index")
+            if _index is not None:
+                model_response.choices[0].index = _index
+
+        self._optional_combine_thinking_block_in_choices(
+            model_response=model_response
+        )
+
+        return model_response
+
     def return_processed_chunk_logic(  # noqa
         self,
         completion_obj: Dict[str, Any],
         model_response: ModelResponseStream,
         response_obj: Dict[str, Any],
     ):
-        from litellm.litellm_core_utils.core_helpers import (
-            preserve_upstream_non_openai_attributes,
-        )
-
         is_chunk_non_empty = self.is_chunk_non_empty(
             completion_obj, model_response, response_obj
         )
@@ -925,72 +1019,11 @@ class CustomStreamWrapper:
         if (
             is_chunk_non_empty
         ):  # cannot set content of an OpenAI Object to be an empty string
-            self.safety_checker()
-            hold, model_response_str = self.check_special_tokens(
-                chunk=completion_obj["content"],
-                finish_reason=model_response.choices[0].finish_reason,
-            )  # filter out bos/eos tokens from openai-compatible hf endpoints
-
-            if hold is False:
-                ## check if openai/azure chunk
-                original_chunk = response_obj.get("original_chunk", None)
-                if original_chunk:
-                    if len(original_chunk.choices) > 0:
-                        choices = []
-                        for choice in original_chunk.choices:
-                            try:
-                                if isinstance(choice, BaseModel):
-                                    choice_json = choice.model_dump()  # type: ignore
-                                    choice_json.pop(
-                                        "finish_reason", None
-                                    )  # for mistral etc. which return a value in their last chunk (not-openai compatible).
-                                    choices.append(StreamingChoices(**choice_json))
-                            except Exception:
-                                choices.append(StreamingChoices())
-                        setattr(model_response, "choices", choices)
-                    else:
-                        return
-                    model_response.system_fingerprint = (
-                        original_chunk.system_fingerprint
-                    )
-                    setattr(
-                        model_response,
-                        "citations",
-                        getattr(original_chunk, "citations", None),
-                    )
-                    preserve_upstream_non_openai_attributes(
-                        model_response=model_response,
-                        original_chunk=original_chunk,
-                    )
-
-                    model_response = self.strip_role_from_delta(model_response)
-                    if verbose_logger.isEnabledFor(logging.DEBUG):
-                        verbose_logger.debug(
-                            "model_response.choices[0].delta: %s",
-                            model_response.choices[0].delta,
-                        )
-                else:
-                    ## else
-                    completion_obj["content"] = model_response_str
-                    if self.sent_first_chunk is False:
-                        completion_obj["role"] = "assistant"
-                        self.sent_first_chunk = True
-                    if response_obj.get("provider_specific_fields") is not None:
-                        completion_obj["provider_specific_fields"] = response_obj[
-                            "provider_specific_fields"
-                        ]
-                    model_response.choices[0].delta = Delta(**completion_obj)
-                    _index: Optional[int] = completion_obj.get("index")
-                    if _index is not None:
-                        model_response.choices[0].index = _index
-
-                self._optional_combine_thinking_block_in_choices(
-                    model_response=model_response
-                )
-
-                return model_response
-            else:
-                return
+            return self._finalize_stream_chunk_from_original_openai(
+                completion_obj=completion_obj,
+                model_response=model_response,
+                response_obj=response_obj,
+            )
         elif self.received_finish_reason is not None:
             if self.sent_last_chunk is True:
                 # Bedrock returns the guardrail trace in the last chunk - we want to return this here
@@ -1028,6 +1061,14 @@ class CustomStreamWrapper:
         elif self._has_special_delta_content(model_response):
             return self._handle_special_delta_content(model_response)
         else:
+            # OpenAI 兼容 SSE：即使未命中 is_chunk_non_empty，只要上游带了 original_chunk 也原样转发，
+            # 避免误吞仅含 reasoning_details（如 signature）等字段的帧。
+            if response_obj.get("original_chunk") is not None:
+                return self._finalize_stream_chunk_from_original_openai(
+                    completion_obj=completion_obj,
+                    model_response=model_response,
+                    response_obj=response_obj,
+                )
             if hasattr(model_response, "usage"):
                 self.chunks.append(model_response)
             return
