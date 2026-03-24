@@ -28,14 +28,17 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # 使用 UTC 日期时间（YYYY-MM-DD-HH-MM-SS），便于从 tag 看出构建时间；末尾保留短 SHA 避免同秒重复
       - name: Generate image tags
         id: meta
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
           BRANCH_SLUG=$(echo "$BRANCH_NAME" | tr '/' '-')
+          TIMESTAMP=$(date -u +"%Y-%m-%d-%H-%M-%S")
           echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
           echo "branch_slug=$BRANCH_SLUG" >> $GITHUB_OUTPUT
+          echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -43,5 +46,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.DOCKER_IMAGE }}:${{ steps.meta.outputs.branch_slug }}-${{ steps.meta.outputs.short_sha }}
+            ${{ env.DOCKER_IMAGE }}:${{ steps.meta.outputs.branch_slug }}-${{ steps.meta.outputs.timestamp }}-${{ steps.meta.outputs.short_sha }}
             ${{ env.DOCKER_IMAGE }}:${{ steps.meta.outputs.branch_slug }}-latest
