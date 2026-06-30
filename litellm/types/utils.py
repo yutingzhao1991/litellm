@@ -137,6 +137,19 @@ class SearchContextCostPerQuery(TypedDict, total=False):
     search_context_size_high: float
 
 
+class TimeBasedPricingRule(TypedDict, total=False):
+    name: Optional[str]
+    start_time: Required[str]
+    end_time: Required[str]
+    multiplier: Required[float]
+    days: Optional[List[str]]
+
+
+class TimeBasedPricing(TypedDict, total=False):
+    timezone: Required[str]
+    rules: Required[List[TimeBasedPricingRule]]
+
+
 class AgenticLoopParams(TypedDict, total=False):
     """
     Parameters passed to agentic loop hooks (e.g., WebSearch interception).
@@ -223,6 +236,9 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     tiered_pricing: Optional[
         List[Dict[str, Any]]
     ]  # Tiered pricing structure for models like Dashscope
+    time_based_pricing: Optional[
+        TimeBasedPricing
+    ]  # Time-window based pricing multiplier
     litellm_provider: Required[str]
     mode: Required[
         Literal[
@@ -2906,6 +2922,7 @@ class CustomPricingLiteLLMParams(BaseModel):
     search_context_cost_per_query: Optional[Dict[str, Any]] = None
     citation_cost_per_token: Optional[float] = None
     tiered_pricing: Optional[List[Dict[str, Any]]] = None
+    time_based_pricing: Optional[Dict[str, Any]] = None
 
 
 all_litellm_params = (

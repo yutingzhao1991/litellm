@@ -1457,6 +1457,7 @@ class Logging(LiteLLMLoggingBaseClass):
                     if self.optional_params
                     else None
                 ),
+                "pricing_datetime": self.model_call_details.get("start_time"),
             }
         except Exception as e:  # error creating kwargs for cost calculation
             debug_info = StandardLoggingModelCostFailureDebugInformation(
@@ -5616,4 +5617,3 @@ def create_dummy_standard_logging_payload() -> StandardLoggingPayload:
         model_parameters={"stream": True},
         hidden_params=hidden_params,
     )
-

@@ -5686,6 +5686,7 @@ def _get_model_info_helper(  # noqa: PLR0915
                     "citation_cost_per_token", None
                 ),
                 tiered_pricing=_model_info.get("tiered_pricing", None),
+                time_based_pricing=_model_info.get("time_based_pricing", None),
                 litellm_provider=_model_info.get(
                     "litellm_provider", custom_llm_provider
                 ),

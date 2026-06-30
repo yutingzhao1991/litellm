@@ -33,6 +33,18 @@ Here's the full specification with all available fields:
             "search_context_size_low": 0.0,
             "search_context_size_medium": 0.0
         },
+        "time_based_pricing": {
+            "timezone": "IANA timezone name, e.g. Asia/Shanghai",
+            "rules": [
+                {
+                    "name": "optional rule name",
+                    "start_time": "HH:MM, inclusive",
+                    "end_time": "HH:MM, exclusive",
+                    "multiplier": 2.0,
+                    "days": ["optional lowercase weekday names, e.g. mon, tue"]
+                }
+            ]
+        },
         "supported_regions": [
             "global",
             "us-west-2",
@@ -56,6 +68,42 @@ Here's the full specification with all available fields:
 ```
 
 ### Examples
+
+#### Time Based Pricing
+
+Use `time_based_pricing` when a provider charges a multiplier during specific local time windows. If no rule matches, LiteLLM uses the base price. Invalid time based pricing config is ignored and falls back to the base price.
+
+```json
+{
+    "deepseek/deepseek-chat": {
+        "input_cost_per_token": 2.8e-07,
+        "output_cost_per_token": 4.2e-07,
+        "litellm_provider": "deepseek",
+        "mode": "chat",
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "rules": [
+                {
+                    "name": "deepseek_peak_morning",
+                    "start_time": "09:00",
+                    "end_time": "12:00",
+                    "multiplier": 2.0
+                },
+                {
+                    "name": "deepseek_peak_afternoon",
+                    "start_time": "14:00",
+                    "end_time": "18:00",
+                    "multiplier": 2.0
+                }
+            ]
+        }
+    }
+}
+```
+
+`start_time` is inclusive and `end_time` is exclusive. For example, `09:00` matches the first rule above, while `12:00` does not.
+
+LiteLLM uses the request start time for cost tracking. Timezone-aware datetimes are recommended; naive datetimes are interpreted in the server's local timezone.
 
 #### Anthropic Claude
 

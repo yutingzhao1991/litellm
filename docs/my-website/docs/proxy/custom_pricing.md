@@ -68,6 +68,50 @@ model_list:
       output_cost_per_token: 0.000520 # 👈 ONLY to track cost per token
 ```
 
+## Time Based Pricing
+
+Use `time_based_pricing` to apply a multiplier during provider-specific peak windows. This can be configured in `model_info` for custom proxy models, or in `model_prices_and_context_window.json` for shared model pricing.
+
+If no rule matches, LiteLLM uses the base price. `start_time` is inclusive and `end_time` is exclusive.
+
+LiteLLM uses the request start time for cost tracking. Timezone-aware datetimes are recommended; naive datetimes are interpreted in the server's local timezone.
+
+```yaml
+model_list:
+  - model_name: deepseek-chat
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+    model_info:
+      input_cost_per_token: 0.00000028
+      output_cost_per_token: 0.00000042
+      cache_read_input_token_cost: 0.000000028
+      time_based_pricing:
+        timezone: Asia/Shanghai
+        rules:
+          - name: deepseek_peak_morning
+            start_time: "09:00"
+            end_time: "12:00"
+            multiplier: 2.0
+          - name: deepseek_peak_afternoon
+            start_time: "14:00"
+            end_time: "18:00"
+            multiplier: 2.0
+```
+
+Optional `days` can restrict a rule to specific weekdays:
+
+```yaml
+time_based_pricing:
+  timezone: America/Los_Angeles
+  rules:
+    - name: weekday_peak
+      start_time: "08:00"
+      end_time: "17:00"
+      multiplier: 1.5
+      days: ["mon", "tue", "wed", "thu", "fri"]
+```
+
 ## Override Model Cost Map
 
 You can override [our model cost map](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) with your own custom pricing for a mapped model.

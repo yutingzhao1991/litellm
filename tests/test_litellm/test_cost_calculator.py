@@ -960,6 +960,246 @@ def test_azure_ai_cache_cost_calculation():
     )
 
 
+def _deepseek_peak_model_info():
+    return {
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "rules": [
+                {
+                    "name": "peak_morning",
+                    "start_time": "09:00",
+                    "end_time": "12:00",
+                    "multiplier": 2.0,
+                },
+                {
+                    "name": "peak_afternoon",
+                    "start_time": "14:00",
+                    "end_time": "18:00",
+                    "multiplier": 2.0,
+                },
+            ],
+        }
+    }
+
+
+def test_time_based_pricing_matches_peak_window():
+    from datetime import datetime, timezone
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    result = get_time_based_pricing_result(
+        model_info=_deepseek_peak_model_info(),
+        pricing_datetime=datetime(2026, 7, 15, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["multiplier"] == 2.0
+    assert result["rule_name"] == "peak_morning"
+    assert result["timezone"] == "Asia/Shanghai"
+
+
+def test_time_based_pricing_uses_exclusive_end_time():
+    from datetime import datetime, timezone
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    result = get_time_based_pricing_result(
+        model_info=_deepseek_peak_model_info(),
+        pricing_datetime=datetime(2026, 7, 15, 4, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["multiplier"] == 1.0
+
+
+def test_time_based_pricing_matches_afternoon_peak_window():
+    from datetime import datetime, timezone
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    result = get_time_based_pricing_result(
+        model_info=_deepseek_peak_model_info(),
+        pricing_datetime=datetime(2026, 7, 15, 6, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["multiplier"] == 2.0
+    assert result["rule_name"] == "peak_afternoon"
+
+
+def test_time_based_pricing_returns_default_for_invalid_config():
+    from datetime import datetime, timezone
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    result = get_time_based_pricing_result(
+        model_info={
+            "time_based_pricing": {
+                "timezone": "Not/AZone",
+                "rules": [
+                    {
+                        "name": "bad",
+                        "start_time": "bad",
+                        "end_time": "12:00",
+                        "multiplier": -1,
+                    }
+                ],
+            }
+        },
+        pricing_datetime=datetime(2026, 7, 15, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["multiplier"] == 1.0
+
+
+def test_completion_cost_applies_time_based_multiplier():
+    from datetime import datetime, timezone
+
+    model = "openai/test-time-based-pricing-model"
+    litellm.register_model(
+        {
+            model: {
+                "input_cost_per_token": 0.001,
+                "output_cost_per_token": 0.002,
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "time_based_pricing": {
+                    "timezone": "Asia/Shanghai",
+                    "rules": [
+                        {
+                            "name": "peak",
+                            "start_time": "09:00",
+                            "end_time": "12:00",
+                            "multiplier": 2.0,
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    usage = Usage(prompt_tokens=100, completion_tokens=50, total_tokens=150)
+    response = ModelResponse(usage=usage, model=model)
+
+    off_peak = litellm.completion_cost(
+        completion_response=response,
+        model=model,
+        custom_llm_provider="openai",
+        pricing_datetime=datetime(2026, 7, 15, 5, 0, tzinfo=timezone.utc),
+    )
+    peak = litellm.completion_cost(
+        completion_response=response,
+        model=model,
+        custom_llm_provider="openai",
+        pricing_datetime=datetime(2026, 7, 15, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert off_peak == pytest.approx(0.2)
+    assert peak == pytest.approx(0.4)
+
+
+def test_completion_cost_applies_time_based_multiplier_to_cache_costs():
+    from datetime import datetime, timezone
+
+    model = "openai/test-time-based-cache-pricing-model"
+    litellm.register_model(
+        {
+            model: {
+                "input_cost_per_token": 0.001,
+                "cache_read_input_token_cost": 0.0001,
+                "cache_creation_input_token_cost": 0.0005,
+                "output_cost_per_token": 0.002,
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "time_based_pricing": {
+                    "timezone": "Asia/Shanghai",
+                    "rules": [
+                        {
+                            "name": "peak",
+                            "start_time": "09:00",
+                            "end_time": "12:00",
+                            "multiplier": 2.0,
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    usage = Usage(
+        prompt_tokens=100,
+        completion_tokens=50,
+        total_tokens=150,
+        prompt_tokens_details=PromptTokensDetailsWrapper(
+            text_tokens=40,
+            cached_tokens=50,
+            cache_creation_tokens=10,
+        ),
+    )
+    response = ModelResponse(usage=usage, model=model)
+
+    off_peak = litellm.completion_cost(
+        completion_response=response,
+        model=model,
+        custom_llm_provider="openai",
+        pricing_datetime=datetime(2026, 7, 15, 5, 0, tzinfo=timezone.utc),
+    )
+    peak = litellm.completion_cost(
+        completion_response=response,
+        model=model,
+        custom_llm_provider="openai",
+        pricing_datetime=datetime(2026, 7, 15, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert off_peak == pytest.approx(0.15)
+    assert peak == pytest.approx(0.3)
+
+
+def test_response_cost_calculator_uses_pricing_datetime():
+    from datetime import datetime, timezone
+
+    model = "openai/test-response-cost-pricing-datetime-model"
+    litellm.register_model(
+        {
+            model: {
+                "input_cost_per_token": 0.001,
+                "output_cost_per_token": 0.002,
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "time_based_pricing": {
+                    "timezone": "Asia/Shanghai",
+                    "rules": [
+                        {
+                            "name": "peak",
+                            "start_time": "09:00",
+                            "end_time": "12:00",
+                            "multiplier": 2.0,
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    response = ModelResponse(
+        usage=Usage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
+        model=model,
+    )
+
+    cost = response_cost_calculator(
+        response_object=response,
+        model=model,
+        custom_llm_provider="openai",
+        call_type="completion",
+        optional_params={},
+        pricing_datetime=datetime(2026, 7, 15, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert cost == pytest.approx(0.4)
+
+
 def test_cost_discount_vertex_ai():
     """
     Test that cost discount is applied correctly for Vertex AI provider

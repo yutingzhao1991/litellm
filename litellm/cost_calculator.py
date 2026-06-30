@@ -2,6 +2,7 @@
 ## File for 'response_cost' calculation in Logging
 import logging
 import time
+from datetime import datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, List, Literal, Optional, Tuple, Union, cast
 
@@ -17,6 +18,11 @@ from litellm.constants import (
 )
 from litellm.litellm_core_utils.llm_cost_calc.tool_call_cost_tracking import (
     StandardBuiltInToolCostTracking,
+)
+from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+    TimeBasedPricingResult,
+    apply_time_based_pricing,
+    get_time_based_pricing_result,
 )
 from litellm.litellm_core_utils.llm_cost_calc.usage_object_transformation import (
     TranscriptionUsageObjectTransformation,
@@ -244,6 +250,69 @@ def _transcription_usage_has_token_details(
     return (prompt_tokens_val > 0) or (completion_tokens_val > 0)
 
 
+def _get_time_based_pricing_result_for_model(
+    model: str,
+    custom_llm_provider: Optional[str],
+    pricing_datetime: Optional[datetime],
+) -> TimeBasedPricingResult:
+    try:
+        model_info = _cached_get_model_info_helper(
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+        )
+        return get_time_based_pricing_result(
+            model_info=model_info,
+            pricing_datetime=pricing_datetime,
+        )
+    except Exception as e:
+        verbose_logger.debug(
+            "Error getting time_based_pricing for model=%s, custom_llm_provider=%s - %s",
+            model,
+            custom_llm_provider,
+            str(e),
+        )
+        return get_time_based_pricing_result(
+            model_info=None,
+            pricing_datetime=pricing_datetime,
+        )
+
+
+def _apply_time_based_pricing_to_token_costs(
+    model: str,
+    custom_llm_provider: Optional[str],
+    prompt_cost: float,
+    completion_cost: float,
+    pricing_datetime: Optional[datetime],
+) -> Tuple[float, float]:
+    try:
+        model_info = _cached_get_model_info_helper(
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+        )
+        prompt_cost, completion_cost, pricing_result = apply_time_based_pricing(
+            prompt_cost=prompt_cost,
+            completion_cost=completion_cost,
+            model_info=model_info,
+            pricing_datetime=pricing_datetime,
+        )
+        if pricing_result["multiplier"] != 1.0:
+            verbose_logger.debug(
+                "Applied time_based_pricing multiplier=%s to model=%s, custom_llm_provider=%s",
+                pricing_result["multiplier"],
+                model,
+                custom_llm_provider,
+            )
+        return prompt_cost, completion_cost
+    except Exception as e:
+        verbose_logger.debug(
+            "Error applying time_based_pricing for model=%s, custom_llm_provider=%s - %s",
+            model,
+            custom_llm_provider,
+            str(e),
+        )
+        return prompt_cost, completion_cost
+
+
 def cost_per_token(  # noqa: PLR0915
     model: str = "",
     prompt_tokens: int = 0,
@@ -271,6 +340,7 @@ def cost_per_token(  # noqa: PLR0915
     audio_transcription_file_duration: float = 0.0,  # for audio transcription calls - the file time in seconds
     ### SERVICE TIER ###
     service_tier: Optional[str] = None,  # for OpenAI service tier pricing
+    pricing_datetime: Optional[datetime] = None,
     response: Optional[Any] = None,
 ) -> Tuple[float, float]:  # type: ignore
     """
@@ -359,6 +429,18 @@ def cost_per_token(  # noqa: PLR0915
     ):  # Option 3. if user passed model="bedrock/anthropic.claude-3", use model="anthropic.claude-3"
         model = model_without_prefix
 
+    def _return_with_time_based_pricing(
+        prompt_cost: float,
+        completion_cost: float,
+    ) -> Tuple[float, float]:
+        return _apply_time_based_pricing_to_token_costs(
+            model=model,
+            custom_llm_provider=custom_llm_provider,
+            prompt_cost=prompt_cost,
+            completion_cost=completion_cost,
+            pricing_datetime=pricing_datetime,
+        )
+
     # see this https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models
     if call_type == "speech" or call_type == "aspeech":
         speech_model_info = litellm.get_model_info(
@@ -406,7 +488,7 @@ def cost_per_token(  # noqa: PLR0915
                 service_tier=service_tier,
             )
 
-        return prompt_cost, completion_cost
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif call_type == "arerank" or call_type == "rerank":
         return rerank_cost(
             model=model,
@@ -436,11 +518,12 @@ def cost_per_token(  # noqa: PLR0915
         )
     elif call_type == "atranscription" or call_type == "transcription":
         if _transcription_usage_has_token_details(usage_block):
-            return openai_cost_per_token(
+            prompt_cost, completion_cost = openai_cost_per_token(
                 model=model_without_prefix,
                 usage=usage_block,
                 service_tier=service_tier,
             )
+            return _return_with_time_based_pricing(prompt_cost, completion_cost)
 
         return openai_cost_per_second(
             model=model_without_prefix,
@@ -468,60 +551,91 @@ def cost_per_token(  # noqa: PLR0915
             call_type=call_type,
         )
         if cost_router == "cost_per_character":
-            return google_cost_per_character(
+            prompt_cost, completion_cost = google_cost_per_character(
                 model=model_without_prefix,
                 custom_llm_provider=custom_llm_provider,
                 prompt_characters=prompt_characters,
                 completion_characters=completion_characters,
                 usage=usage_block,
             )
+            return _return_with_time_based_pricing(prompt_cost, completion_cost)
         elif cost_router == "cost_per_token":
-            return google_cost_per_token(
+            prompt_cost, completion_cost = google_cost_per_token(
                 model=model_without_prefix,
                 custom_llm_provider=custom_llm_provider,
                 usage=usage_block,
                 service_tier=service_tier,
             )
+            return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "anthropic":
-        return anthropic_cost_per_token(model=model, usage=usage_block)
+        prompt_cost, completion_cost = anthropic_cost_per_token(
+            model=model, usage=usage_block
+        )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "bedrock":
-        return bedrock_cost_per_token(
+        prompt_cost, completion_cost = bedrock_cost_per_token(
             model=model, usage=usage_block, service_tier=service_tier
         )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "openai":
-        return openai_cost_per_token(
+        prompt_cost, completion_cost = openai_cost_per_token(
             model=model, usage=usage_block, service_tier=service_tier
         )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "databricks":
-        return databricks_cost_per_token(model=model, usage=usage_block)
+        prompt_cost, completion_cost = databricks_cost_per_token(
+            model=model, usage=usage_block
+        )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "fireworks_ai":
-        return fireworks_ai_cost_per_token(model=model, usage=usage_block)
+        prompt_cost, completion_cost = fireworks_ai_cost_per_token(
+            model=model, usage=usage_block
+        )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "azure":
-        return azure_openai_cost_per_token(
+        prompt_cost, completion_cost = azure_openai_cost_per_token(
             model=model, usage=usage_block, response_time_ms=response_time_ms
         )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "gemini":
-        return gemini_cost_per_token(
+        prompt_cost, completion_cost = gemini_cost_per_token(
             model=model, usage=usage_block, service_tier=service_tier
         )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "deepseek":
-        return deepseek_cost_per_token(model=model, usage=usage_block)
+        prompt_cost, completion_cost = deepseek_cost_per_token(
+            model=model, usage=usage_block
+        )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "perplexity":
-        return perplexity_cost_per_token(model=model, usage=usage_block)
+        prompt_cost, completion_cost = perplexity_cost_per_token(
+            model=model, usage=usage_block
+        )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "xai":
-        return xai_cost_per_token(model=model, usage=usage_block)
+        prompt_cost, completion_cost = xai_cost_per_token(
+            model=model, usage=usage_block
+        )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "lemonade":
-        return lemonade_cost_per_token(model=model, usage=usage_block)
+        prompt_cost, completion_cost = lemonade_cost_per_token(
+            model=model, usage=usage_block
+        )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "dashscope":
         from litellm.llms.dashscope.cost_calculator import (
             cost_per_token as dashscope_cost_per_token,
         )
 
-        return dashscope_cost_per_token(model=model, usage=usage_block)
+        prompt_cost, completion_cost = dashscope_cost_per_token(
+            model=model, usage=usage_block
+        )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     elif custom_llm_provider == "azure_ai":
-        return azure_ai_cost_per_token(
+        prompt_cost, completion_cost = azure_ai_cost_per_token(
             model=model, usage=usage_block, response_time_ms=response_time_ms
         )
+        return _return_with_time_based_pricing(prompt_cost, completion_cost)
     else:
         model_info = _cached_get_model_info_helper(
             model=model, custom_llm_provider=custom_llm_provider
@@ -531,12 +645,13 @@ def cost_per_token(  # noqa: PLR0915
             model_info.get("input_cost_per_token", 0) > 0
             or model_info.get("output_cost_per_token", 0) > 0
         ):
-            return generic_cost_per_token(
+            prompt_cost, completion_cost = generic_cost_per_token(
                 model=model,
                 usage=usage_block,
                 custom_llm_provider=custom_llm_provider,
                 service_tier=service_tier,
             )
+            return _return_with_time_based_pricing(prompt_cost, completion_cost)
 
         if (
             model_info.get("input_cost_per_second", None) is not None
@@ -574,7 +689,9 @@ def cost_per_token(  # noqa: PLR0915
             prompt_tokens_cost_usd_dollar,
             completion_tokens_cost_usd_dollar,
         )
-        return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
+        return _return_with_time_based_pricing(
+            prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
+        )
 
 
 def get_replicate_completion_pricing(completion_response: dict, total_time=0.0):
@@ -1011,6 +1128,7 @@ def completion_cost(  # noqa: PLR0915
     litellm_logging_obj: Optional[LitellmLoggingObject] = None,
     ### SERVICE TIER ###
     service_tier: Optional[str] = None,  # for OpenAI service tier pricing
+    pricing_datetime: Optional[datetime] = None,
 ) -> float:
     """
     Calculate the cost of a given completion call fot GPT-3.5-turbo, llama2, any litellm supported llm.
@@ -1472,6 +1590,7 @@ def completion_cost(  # noqa: PLR0915
                     audio_transcription_file_duration=audio_transcription_file_duration,
                     rerank_billed_units=rerank_billed_units,
                     service_tier=service_tier,
+                    pricing_datetime=pricing_datetime,
                     response=completion_response,
                 )
 
@@ -1487,6 +1606,24 @@ def completion_cost(  # noqa: PLR0915
                 else:
                     additional_costs = None
 
+                time_based_pricing_result = _get_time_based_pricing_result_for_model(
+                    model=model,
+                    custom_llm_provider=custom_llm_provider,
+                    pricing_datetime=pricing_datetime,
+                )
+                if time_based_pricing_result["multiplier"] != 1.0:
+                    additional_costs = dict(additional_costs or {})
+                    additional_costs["time_based_pricing_multiplier"] = (
+                        time_based_pricing_result["multiplier"]
+                    )
+                    if time_based_pricing_result.get("rule_name") is not None:
+                        additional_costs["time_based_pricing_rule"] = (
+                            time_based_pricing_result["rule_name"]
+                        )
+                    if time_based_pricing_result.get("timezone") is not None:
+                        additional_costs["time_based_pricing_timezone"] = (
+                            time_based_pricing_result["timezone"]
+                        )
 
                 _final_cost = (
                     prompt_tokens_cost_usd_dollar + completion_tokens_cost_usd_dollar
@@ -1632,6 +1769,7 @@ def response_cost_calculator(
     litellm_logging_obj: Optional[LitellmLoggingObject] = None,
     ### SERVICE TIER ###
     service_tier: Optional[str] = None,  # for OpenAI service tier pricing
+    pricing_datetime: Optional[datetime] = None,
 ) -> float:
     """
     Returns
@@ -1665,6 +1803,7 @@ def response_cost_calculator(
                 router_model_id=router_model_id,
                 litellm_logging_obj=litellm_logging_obj,
                 service_tier=service_tier,
+                pricing_datetime=pricing_datetime,
             )
         return response_cost
     except Exception as e:
@@ -2236,4 +2375,3 @@ def handle_realtime_stream_cost_calculation(
     total_cost = input_cost_per_token + output_cost_per_token
 
     return total_cost
-
