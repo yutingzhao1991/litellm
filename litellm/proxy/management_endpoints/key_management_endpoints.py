@@ -3805,6 +3805,7 @@ async def validate_key_list_check(
     key_alias: Optional[str],
     key_hash: Optional[str],
     prisma_client: PrismaClient,
+    user_ids: Optional[List[str]] = None,
 ) -> Optional[LiteLLM_UserTable]:
     if user_api_key_dict.user_role == LitellmUserRoles.PROXY_ADMIN.value:
         return None
@@ -3833,9 +3834,18 @@ async def validate_key_list_check(
 
     complete_user_info = LiteLLM_UserTable(**complete_user_info_db_obj.model_dump())
 
-    # internal user can only see their own keys
-    if user_id:
-        if complete_user_info.user_id != user_id:
+    # Internal users can only see their own keys. Multi-user filtering is
+    # intended for proxy admins (for example, querying a canonical user ID and
+    # a legacy user ID in a single request).
+    requested_user_ids = _normalize_user_id_filters(
+        user_id=user_id,
+        user_ids=user_ids,
+    )
+    if requested_user_ids:
+        if any(
+            requested_user_id != complete_user_info.user_id
+            for requested_user_id in requested_user_ids
+        ):
             raise ProxyException(
                 message="You are not authorized to check another user's keys",
                 type=ProxyErrorTypes.bad_request_error,
@@ -3979,6 +3989,10 @@ async def list_keys(
     page: int = Query(1, description="Page number", ge=1),
     size: int = Query(10, description="Page size", ge=1, le=100),
     user_id: Optional[str] = Query(None, description="Filter keys by user ID"),
+    user_ids: Optional[List[str]] = Query(
+        None,
+        description="Filter keys by multiple user IDs. Repeating this query parameter applies an IN filter.",
+    ),
     team_id: Optional[str] = Query(None, description="Filter keys by team ID"),
     organization_id: Optional[str] = Query(
         None, description="Filter keys by organization ID"
@@ -4012,6 +4026,8 @@ async def list_keys(
     List all keys for a given user / team / organization.
 
     Parameters:
+        user_id: Optional[str] - Filter keys by a single user ID.
+        user_ids: Optional[List[str]] - Filter keys by multiple user IDs using a single IN query.
         expand: Optional[List[str]] - Expand related objects (e.g. 'user' to include user information)
         status: Optional[str] - Filter by status. Currently supports "deleted" to query deleted keys.
 
@@ -4052,6 +4068,7 @@ async def list_keys(
             key_alias=key_alias,
             key_hash=key_hash,
             prisma_client=prisma_client,
+            user_ids=user_ids if isinstance(user_ids, list) else None,
         )
 
         # Fetch team objects once when needed for either admin or member filtering.
@@ -4077,10 +4094,15 @@ async def list_keys(
         else:
             admin_team_ids = None
 
-        if not user_id and user_api_key_dict.user_role not in [
-            LitellmUserRoles.PROXY_ADMIN.value,
-            LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
-        ]:
+        if (
+            not user_id
+            and not (isinstance(user_ids, list) and user_ids)
+            and user_api_key_dict.user_role
+            not in [
+                LitellmUserRoles.PROXY_ADMIN.value,
+                LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
+            ]
+        ):
             user_id = user_api_key_dict.user_id
 
         response = await _list_key_helper(
@@ -4088,6 +4110,7 @@ async def list_keys(
             page=page,
             size=size,
             user_id=user_id,
+            user_ids=user_ids if isinstance(user_ids, list) else None,
             team_id=team_id,
             key_alias=key_alias,
             key_hash=key_hash,
@@ -4268,6 +4291,23 @@ def _validate_sort_params(
     return order_by
 
 
+def _normalize_user_id_filters(
+    user_id: Optional[str],
+    user_ids: Optional[List[str]],
+) -> List[str]:
+    """Return non-empty user ID filters in stable, de-duplicated order."""
+    requested_user_ids: List[str] = []
+    if isinstance(user_id, str) and user_id:
+        requested_user_ids.append(user_id)
+    if isinstance(user_ids, list):
+        requested_user_ids.extend(
+            candidate
+            for candidate in user_ids
+            if isinstance(candidate, str) and candidate
+        )
+    return list(dict.fromkeys(requested_user_ids))
+
+
 def _build_key_filter_conditions(
     user_id: Optional[str],
     team_id: Optional[str],
@@ -4280,6 +4320,7 @@ def _build_key_filter_conditions(
     include_created_by_keys: bool = False,
     project_id: Optional[str] = None,
     access_group_id: Optional[str] = None,
+    user_ids: Optional[List[str]] = None,
 ) -> Dict[str, Union[str, Dict[str, Any], List[Dict[str, Any]]]]:
     """Build filter conditions for key listing.
 
@@ -4300,7 +4341,13 @@ def _build_key_filter_conditions(
 
     # Base conditions for user's own keys
     user_condition: Dict[str, Any] = {}
-    if user_id and isinstance(user_id, str):
+    requested_user_ids = _normalize_user_id_filters(
+        user_id=user_id,
+        user_ids=user_ids,
+    )
+    if user_ids is not None and requested_user_ids:
+        user_condition["user_id"] = {"in": requested_user_ids}
+    elif user_id and isinstance(user_id, str):
         user_condition["user_id"] = user_id
     if team_id and isinstance(team_id, str):
         user_condition["team_id"] = team_id
@@ -4406,6 +4453,7 @@ async def _list_key_helper(
     status: Optional[str] = None,
     project_id: Optional[str] = None,
     access_group_id: Optional[str] = None,
+    user_ids: Optional[List[str]] = None,
 ) -> KeyListResponseObject:
     """
     Helper function to list keys
@@ -4413,6 +4461,7 @@ async def _list_key_helper(
         page: int
         size: int
         user_id: Optional[str]
+        user_ids: Optional[List[str]] # list of user IDs to match with an IN filter
         team_id: Optional[str]
         key_alias: Optional[str]
         exclude_team_id: Optional[str] # exclude a specific team_id
@@ -4441,6 +4490,7 @@ async def _list_key_helper(
         include_created_by_keys=include_created_by_keys,
         project_id=project_id,
         access_group_id=access_group_id,
+        user_ids=user_ids,
     )
 
     # Calculate skip for pagination

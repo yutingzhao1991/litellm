@@ -90,6 +90,34 @@ async def test_list_keys():
 
 
 @pytest.mark.asyncio
+async def test_list_keys_filters_multiple_user_ids_in_single_query():
+    mock_prisma_client = AsyncMock()
+    mock_find_many = AsyncMock(return_value=[])
+    mock_count = AsyncMock(return_value=0)
+    mock_prisma_client.db.litellm_verificationtoken.find_many = mock_find_many
+    mock_prisma_client.db.litellm_verificationtoken.count = mock_count
+
+    await _list_key_helper(
+        prisma_client=mock_prisma_client,
+        page=1,
+        size=30,
+        user_id="perallm-user-id",
+        user_ids=["perallm-user-id", "legacy@example.com", "perallm-user-id"],
+        team_id=None,
+        organization_id=None,
+        key_alias=None,
+        key_hash=None,
+        return_full_object=True,
+    )
+
+    mock_find_many.assert_called_once()
+    where_condition = mock_find_many.call_args.kwargs["where"]
+    assert where_condition["user_id"] == {
+        "in": ["perallm-user-id", "legacy@example.com"]
+    }
+
+
+@pytest.mark.asyncio
 async def test_list_keys_include_created_by_keys():
     """
     Test that include_created_by_keys parameter correctly includes keys created by the user
@@ -5410,6 +5438,39 @@ async def test_validate_key_list_check_proxy_admin():
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_validate_key_list_check_non_admin_rejects_multiple_user_ids():
+    mock_prisma_client = AsyncMock()
+    user_info = LiteLLM_UserTable(
+        user_id="test-user",
+        user_email="test@example.com",
+        teams=[],
+        organization_memberships=[],
+    )
+    mock_prisma_client.db.litellm_usertable.find_unique = AsyncMock(
+        return_value=user_info
+    )
+    user_api_key_dict = UserAPIKeyAuth(
+        user_role=LitellmUserRoles.INTERNAL_USER,
+        user_id="test-user",
+    )
+
+    with pytest.raises(ProxyException) as exc_info:
+        await validate_key_list_check(
+            user_api_key_dict=user_api_key_dict,
+            user_id=None,
+            user_ids=["test-user", "legacy@example.com"],
+            team_id=None,
+            organization_id=None,
+            key_alias=None,
+            key_hash=None,
+            prisma_client=mock_prisma_client,
+        )
+
+    assert exc_info.value.code == "403" or exc_info.value.code == 403
+    assert "not authorized to check another user's keys" in exc_info.value.message
 
 
 @pytest.mark.asyncio
