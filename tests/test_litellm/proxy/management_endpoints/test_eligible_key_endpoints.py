@@ -49,6 +49,11 @@ def test_eligible_key_availability(
 async def test_eligible_key_helper_returns_all_useful_keys_with_summary_projection():
     now = datetime(2026, 7, 31, tzinfo=timezone.utc)
 
+    def raw_timestamp(value):
+        if value is None:
+            return None
+        return value.isoformat().replace("+00:00", "Z")
+
     def key_row(
         name,
         *,
@@ -63,11 +68,11 @@ async def test_eligible_key_helper_returns_all_useful_keys_with_summary_projecti
             "key_alias": None,
             "spend": spend,
             "max_budget": max_budget,
-            "expires": expires,
+            "expires": raw_timestamp(expires),
             "budget_duration": "30d" if reset_at else None,
-            "budget_reset_at": reset_at,
-            "created_at": now - timedelta(days=10),
-            "updated_at": updated_at or now,
+            "budget_reset_at": raw_timestamp(reset_at),
+            "created_at": raw_timestamp(now - timedelta(days=10)),
+            "updated_at": raw_timestamp(updated_at or now),
             "blocked": False,
         }
 

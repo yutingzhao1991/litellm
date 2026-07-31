@@ -18,7 +18,7 @@ import re
 import secrets
 import traceback
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Literal, Optional, Tuple, cast
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
 
 import fastapi
 import yaml
@@ -4155,9 +4155,16 @@ async def list_keys(
         )
 
 
-def _normalize_datetime_to_utc(value: Optional[datetime]) -> Optional[datetime]:
+def _normalize_datetime_to_utc(
+    value: Optional[Union[datetime, str]],
+) -> Optional[datetime]:
     if value is None:
         return None
+    if isinstance(value, str):
+        normalized_value = value.strip()
+        if normalized_value.endswith("Z"):
+            normalized_value = f"{normalized_value[:-1]}+00:00"
+        value = datetime.fromisoformat(normalized_value)
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
