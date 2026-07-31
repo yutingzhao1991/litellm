@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -58,18 +58,18 @@ async def test_eligible_key_helper_returns_all_useful_keys_with_summary_projecti
         expires=None,
         updated_at=None,
     ):
-        return MagicMock(
-            key_name=name,
-            key_alias=None,
-            spend=spend,
-            max_budget=max_budget,
-            expires=expires,
-            budget_duration="30d" if reset_at else None,
-            budget_reset_at=reset_at,
-            created_at=now - timedelta(days=10),
-            updated_at=updated_at or now,
-            blocked=False,
-        )
+        return {
+            "key_name": name,
+            "key_alias": None,
+            "spend": spend,
+            "max_budget": max_budget,
+            "expires": expires,
+            "budget_duration": "30d" if reset_at else None,
+            "budget_reset_at": reset_at,
+            "created_at": now - timedelta(days=10),
+            "updated_at": updated_at or now,
+            "blocked": False,
+        }
 
     rows = [
         key_row("unlimited", spend=100.0, max_budget=None),
@@ -99,8 +99,8 @@ async def test_eligible_key_helper_returns_all_useful_keys_with_summary_projecti
         ),
     ]
     mock_prisma_client = AsyncMock()
-    mock_find_many = AsyncMock(return_value=rows)
-    mock_prisma_client.db.litellm_verificationtoken.find_many = mock_find_many
+    mock_query_raw = AsyncMock(return_value=rows)
+    mock_prisma_client.db.query_raw = mock_query_raw
 
     response = await _eligible_key_helper(
         prisma_client=mock_prisma_client,
@@ -122,27 +122,20 @@ async def test_eligible_key_helper_returns_all_useful_keys_with_summary_projecti
     ]
     assert [key.usable_now for key in response.keys] == [False, True, True, False]
 
-    mock_find_many.assert_awaited_once()
-    query = mock_find_many.call_args.kwargs
-    assert "take" not in query
-    assert "order" not in query
-    assert "include" not in query
-    assert query["where"]["AND"][0] == {
-        "user_id": {"in": ["stable-id", "legacy@example.com"]}
-    }
-    assert {"OR": [{"blocked": None}, {"blocked": False}]} in query["where"]["AND"]
-    assert {"OR": [{"expires": None}, {"expires": {"gt": now}}]} in query["where"][
-        "AND"
-    ]
-    assert query["select"] == {
-        "key_name": True,
-        "key_alias": True,
-        "spend": True,
-        "max_budget": True,
-        "expires": True,
-        "budget_duration": True,
-        "budget_reset_at": True,
-        "created_at": True,
-        "updated_at": True,
-        "blocked": True,
-    }
+    mock_query_raw.assert_awaited_once()
+    sql_query, *query_params = mock_query_raw.call_args.args
+    assert 'FROM "LiteLLM_VerificationToken"' in sql_query
+    assert "user_id IN ($3, $4)" in sql_query
+    assert "team_id != $1" in sql_query
+    assert "expires > $2::timestamp" in sql_query
+    assert "COALESCE(spend, 0) < max_budget" in sql_query
+    assert "budget_reset_at < expires" in sql_query
+    assert "SELECT\n            key_name," in sql_query
+    assert "token" not in sql_query
+    assert "stable-id" not in sql_query
+    assert "legacy@example.com" not in sql_query
+    assert "LIMIT" not in sql_query
+    assert "COUNT(" not in sql_query
+    assert query_params[0] == "litellm-dashboard"
+    assert query_params[1] == now.replace(tzinfo=None)
+    assert query_params[2:] == ["stable-id", "legacy@example.com"]

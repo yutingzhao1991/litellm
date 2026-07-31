@@ -4211,54 +4211,68 @@ async def _eligible_key_helper(
         if now is not None
         else datetime.now(timezone.utc)
     )
-    where: Dict[str, Any] = {
-        "AND": [
-            {"user_id": {"in": requested_user_ids}},
-            _get_condition_to_filter_out_ui_session_tokens(),
-            {"OR": [{"blocked": None}, {"blocked": False}]},
-            {"OR": [{"expires": None}, {"expires": {"gt": current_time}}]},
-        ]
-    }
-    select = {
-        "key_name": True,
-        "key_alias": True,
-        "spend": True,
-        "max_budget": True,
-        "expires": True,
-        "budget_duration": True,
-        "budget_reset_at": True,
-        "created_at": True,
-        "updated_at": True,
-        "blocked": True,
-    }
-    rows = await prisma_client.db.litellm_verificationtoken.find_many(
-        where=where,  # type: ignore
-        select=select,
+    # prisma-client-py's generated find_many() in this LiteLLM version does not
+    # support a `select` argument. Use parameterized raw SQL so the endpoint keeps
+    # its lightweight projection without loading full key rows into memory.
+    query_params: List[Any] = [
+        UI_SESSION_TOKEN_TEAM_ID,
+        current_time.replace(tzinfo=None),
+        *requested_user_ids,
+    ]
+    user_id_placeholders = ", ".join(
+        f"${index}" for index in range(3, len(query_params) + 1)
     )
+    sql_query = f"""
+        SELECT
+            key_name,
+            key_alias,
+            spend,
+            max_budget,
+            expires,
+            budget_duration,
+            budget_reset_at,
+            created_at,
+            updated_at,
+            blocked
+        FROM "LiteLLM_VerificationToken"
+        WHERE user_id IN ({user_id_placeholders})
+          AND (team_id IS NULL OR team_id != $1)
+          AND (blocked IS NULL OR blocked = FALSE)
+          AND (expires IS NULL OR expires > $2::timestamp)
+          AND (
+              max_budget IS NULL
+              OR COALESCE(spend, 0) < max_budget
+              OR (
+                  budget_reset_at IS NOT NULL
+                  AND (expires IS NULL OR budget_reset_at < expires)
+              )
+          )
+    """
+    rows = await prisma_client.db.query_raw(sql_query, *query_params)
 
     eligible_keys: List[EligibleKeySummary] = []
     for row in rows:
         availability = _eligible_key_availability(
-            spend=row.spend,
-            max_budget=row.max_budget,
-            budget_reset_at=row.budget_reset_at,
-            expires=row.expires,
+            spend=row.get("spend"),
+            max_budget=row.get("max_budget"),
+            budget_reset_at=row.get("budget_reset_at"),
+            expires=row.get("expires"),
             now=current_time,
         )
         if availability is None:
             continue
         eligible_keys.append(
             EligibleKeySummary(
-                key_name=row.key_name,
-                key_alias=row.key_alias,
-                spend=row.spend or 0.0,
-                max_budget=row.max_budget,
-                expires=row.expires,
-                budget_duration=row.budget_duration,
-                budget_reset_at=row.budget_reset_at,
-                created_at=row.created_at,
-                updated_at=row.updated_at,
-                blocked=row.blocked,
+                key_name=row.get("key_name"),
+                key_alias=row.get("key_alias"),
+                spend=row.get("spend") or 0.0,
+                max_budget=row.get("max_budget"),
+                expires=row.get("expires"),
+                budget_duration=row.get("budget_duration"),
+                budget_reset_at=row.get("budget_reset_at"),
+                created_at=row.get("created_at"),
+                updated_at=row.get("updated_at"),
+                blocked=row.get("blocked"),
                 availability=availability,
                 usable_now=availability == "available",
             )
