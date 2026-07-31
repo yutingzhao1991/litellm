@@ -83,6 +83,9 @@ from litellm.types.proxy.management_endpoints.key_management_endpoints import (
     BulkUpdateKeyRequest,
     BulkUpdateKeyRequestItem,
     BulkUpdateKeyResponse,
+    EligibleKeyRequest,
+    EligibleKeyResponse,
+    EligibleKeySummary,
     FailedKeyUpdate,
     SuccessfulKeyUpdate,
 )
@@ -4143,6 +4146,193 @@ async def list_keys(
                 ),
             )
         elif isinstance(e, ProxyException):
+            raise e
+        raise ProxyException(
+            message="Authentication Error, " + str(e),
+            type=ProxyErrorTypes.internal_server_error,
+            param=getattr(e, "param", "None"),
+            code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+def _normalize_datetime_to_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _eligible_key_availability(
+    *,
+    spend: Optional[float],
+    max_budget: Optional[float],
+    budget_reset_at: Optional[datetime],
+    expires: Optional[datetime],
+    now: datetime,
+) -> Optional[Literal["available", "waiting_for_reset", "reset_pending"]]:
+    """Return a key's useful availability, or None when its budget is terminal."""
+
+    current_spend = spend or 0.0
+    if max_budget is None or current_spend < max_budget:
+        return "available"
+
+    reset_at = _normalize_datetime_to_utc(budget_reset_at)
+    if reset_at is None:
+        return None
+
+    normalized_expires = _normalize_datetime_to_utc(expires)
+    if normalized_expires is not None and reset_at >= normalized_expires:
+        return None
+
+    normalized_now = _normalize_datetime_to_utc(now) or now
+    if reset_at > normalized_now:
+        return "waiting_for_reset"
+    return "reset_pending"
+
+
+async def _eligible_key_helper(
+    *,
+    prisma_client: PrismaClient,
+    user_ids: List[str],
+    now: Optional[datetime] = None,
+) -> EligibleKeyResponse:
+    """Fetch every non-expired key that is usable now or can become usable again."""
+
+    requested_user_ids = _normalize_user_id_filters(user_id=None, user_ids=user_ids)
+    if not requested_user_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "user_ids must contain at least one non-empty user ID"},
+        )
+
+    current_time = (
+        (_normalize_datetime_to_utc(now) or now)
+        if now is not None
+        else datetime.now(timezone.utc)
+    )
+    where: Dict[str, Any] = {
+        "AND": [
+            {"user_id": {"in": requested_user_ids}},
+            _get_condition_to_filter_out_ui_session_tokens(),
+            {"OR": [{"blocked": None}, {"blocked": False}]},
+            {"OR": [{"expires": None}, {"expires": {"gt": current_time}}]},
+        ]
+    }
+    select = {
+        "key_name": True,
+        "key_alias": True,
+        "spend": True,
+        "max_budget": True,
+        "expires": True,
+        "budget_duration": True,
+        "budget_reset_at": True,
+        "created_at": True,
+        "updated_at": True,
+        "blocked": True,
+    }
+    rows = await prisma_client.db.litellm_verificationtoken.find_many(
+        where=where,  # type: ignore
+        select=select,
+    )
+
+    eligible_keys: List[EligibleKeySummary] = []
+    for row in rows:
+        availability = _eligible_key_availability(
+            spend=row.spend,
+            max_budget=row.max_budget,
+            budget_reset_at=row.budget_reset_at,
+            expires=row.expires,
+            now=current_time,
+        )
+        if availability is None:
+            continue
+        eligible_keys.append(
+            EligibleKeySummary(
+                key_name=row.key_name,
+                key_alias=row.key_alias,
+                spend=row.spend or 0.0,
+                max_budget=row.max_budget,
+                expires=row.expires,
+                budget_duration=row.budget_duration,
+                budget_reset_at=row.budget_reset_at,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+                blocked=row.blocked,
+                availability=availability,
+                usable_now=availability == "available",
+            )
+        )
+
+    eligible_keys.sort(
+        key=lambda key: _normalize_datetime_to_utc(key.updated_at)
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return EligibleKeyResponse(keys=eligible_keys)
+
+
+@router.post(
+    "/key/eligible",
+    tags=["key management"],
+    dependencies=[Depends(user_api_key_auth)],
+    response_model=EligibleKeyResponse,
+)
+@management_endpoint_wrapper
+async def list_eligible_keys(
+    data: EligibleKeyRequest,
+    http_request: Request,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+) -> EligibleKeyResponse:
+    """Return all unexpired keys that have budget now or a reset before expiry."""
+
+    try:
+        from litellm.proxy.proxy_server import prisma_client
+
+        if prisma_client is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": "Database not connected"},
+            )
+
+        requested_user_ids = _normalize_user_id_filters(
+            user_id=None,
+            user_ids=data.user_ids,
+        )
+        if not requested_user_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "user_ids must contain at least one non-empty user ID"
+                },
+            )
+
+        await validate_key_list_check(
+            user_api_key_dict=user_api_key_dict,
+            user_id=None,
+            user_ids=requested_user_ids,
+            team_id=None,
+            organization_id=None,
+            key_alias=None,
+            key_hash=None,
+            prisma_client=prisma_client,
+        )
+        return await _eligible_key_helper(
+            prisma_client=prisma_client,
+            user_ids=requested_user_ids,
+        )
+    except Exception as e:
+        verbose_proxy_logger.exception("Error in list_eligible_keys: %s", e)
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "detail", f"error({str(e)})"),
+                type=ProxyErrorTypes.internal_server_error,
+                param=getattr(e, "param", "None"),
+                code=getattr(
+                    e, "status_code", fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR
+                ),
+            )
+        if isinstance(e, ProxyException):
             raise e
         raise ProxyException(
             message="Authentication Error, " + str(e),
