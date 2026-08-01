@@ -62,7 +62,9 @@ class EligibleKeySummary(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     blocked: Optional[bool] = None
-    availability: Literal["available", "waiting_for_reset", "reset_pending"]
+    availability: Literal[
+        "available", "waiting_for_reset", "reset_pending", "exhausted"
+    ]
     usable_now: bool
 
 

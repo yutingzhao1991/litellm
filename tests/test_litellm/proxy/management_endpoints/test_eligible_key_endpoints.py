@@ -16,18 +16,20 @@ def test_eligible_key_endpoint_is_additive_post_route():
 
 
 @pytest.mark.parametrize(
-    "spend,max_budget,reset_delta,expires_delta,expected",
+    "spend,max_budget,reset_delta,expires_delta,key_alias,expected",
     [
-        (10.0, None, None, None, "available"),
-        (9.0, 10.0, None, None, "available"),
-        (10.0, 10.0, 1, 2, "waiting_for_reset"),
-        (10.0, 10.0, -1, 2, "reset_pending"),
-        (10.0, 10.0, None, 2, None),
-        (10.0, 10.0, 2, 1, None),
+        (10.0, None, None, None, None, "available"),
+        (9.0, 10.0, None, None, None, "available"),
+        (10.0, 10.0, 1, 2, None, "waiting_for_reset"),
+        (10.0, 10.0, -1, 2, None, "reset_pending"),
+        (10.0, 10.0, None, 2, None, None),
+        (10.0, 10.0, 2, 1, None, None),
+        (10.0, 10.0, None, 2, "product_pro_monthly_x", "exhausted"),
+        (10.0, 10.0, 2, 1, "product_vip_monthly_x", "exhausted"),
     ],
 )
 def test_eligible_key_availability(
-    spend, max_budget, reset_delta, expires_delta, expected
+    spend, max_budget, reset_delta, expires_delta, key_alias, expected
 ):
     now = datetime(2026, 7, 31, tzinfo=timezone.utc)
     reset_at = now + timedelta(days=reset_delta) if reset_delta is not None else None
@@ -40,6 +42,7 @@ def test_eligible_key_availability(
             budget_reset_at=reset_at,
             expires=expires,
             now=now,
+            key_alias=key_alias,
         )
         == expected
     )
@@ -62,10 +65,11 @@ async def test_eligible_key_helper_returns_all_useful_keys_with_summary_projecti
         reset_at=None,
         expires=None,
         updated_at=None,
+        key_alias=None,
     ):
         return {
             "key_name": name,
-            "key_alias": None,
+            "key_alias": key_alias,
             "spend": spend,
             "max_budget": max_budget,
             "expires": raw_timestamp(expires),
@@ -102,6 +106,14 @@ async def test_eligible_key_helper_returns_all_useful_keys_with_summary_projecti
             reset_at=now + timedelta(days=2),
             expires=now + timedelta(days=1),
         ),
+        key_row(
+            "membership-exhausted",
+            spend=2.0,
+            max_budget=2.0,
+            expires=now + timedelta(days=10),
+            key_alias="product_pro_monthly_20260701_x",
+            updated_at=now + timedelta(minutes=2),
+        ),
     ]
     mock_prisma_client = AsyncMock()
     mock_query_raw = AsyncMock(return_value=rows)
@@ -114,18 +126,26 @@ async def test_eligible_key_helper_returns_all_useful_keys_with_summary_projecti
     )
 
     assert [key.key_name for key in response.keys] == [
+        "membership-exhausted",
         "waiting",
         "unlimited",
         "available",
         "pending",
     ]
     assert [key.availability for key in response.keys] == [
+        "exhausted",
         "waiting_for_reset",
         "available",
         "available",
         "reset_pending",
     ]
-    assert [key.usable_now for key in response.keys] == [False, True, True, False]
+    assert [key.usable_now for key in response.keys] == [
+        False,
+        False,
+        True,
+        True,
+        False,
+    ]
 
     mock_query_raw.assert_awaited_once()
     sql_query, *query_params = mock_query_raw.call_args.args
@@ -135,6 +155,7 @@ async def test_eligible_key_helper_returns_all_useful_keys_with_summary_projecti
     assert "expires > $2::timestamp" in sql_query
     assert "COALESCE(spend, 0) < max_budget" in sql_query
     assert "budget_reset_at < expires" in sql_query
+    assert "key_alias IS NOT NULL AND key_alias <> ''" in sql_query
     assert "SELECT\n            key_name," in sql_query
     assert "token" not in sql_query
     assert "stable-id" not in sql_query

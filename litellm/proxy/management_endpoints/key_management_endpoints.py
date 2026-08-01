@@ -4177,8 +4177,16 @@ def _eligible_key_availability(
     budget_reset_at: Optional[datetime],
     expires: Optional[datetime],
     now: datetime,
-) -> Optional[Literal["available", "waiting_for_reset", "reset_pending"]]:
-    """Return a key's useful availability, or None when its budget is terminal."""
+    key_alias: Optional[str] = None,
+) -> Optional[
+    Literal["available", "waiting_for_reset", "reset_pending", "exhausted"]
+]:
+    """Return a key's useful availability, or None when it should be omitted.
+
+    Membership keys (non-empty key_alias) stay visible until expiry even after
+    the budget is fully spent, so clients can keep membership entitlements.
+    Non-membership keys with a terminal budget are omitted.
+    """
 
     current_spend = spend or 0.0
     if max_budget is None or current_spend < max_budget:
@@ -4186,11 +4194,11 @@ def _eligible_key_availability(
 
     reset_at = _normalize_datetime_to_utc(budget_reset_at)
     if reset_at is None:
-        return None
+        return "exhausted" if key_alias else None
 
     normalized_expires = _normalize_datetime_to_utc(expires)
     if normalized_expires is not None and reset_at >= normalized_expires:
-        return None
+        return "exhausted" if key_alias else None
 
     normalized_now = _normalize_datetime_to_utc(now) or now
     if reset_at > normalized_now:
@@ -4204,7 +4212,7 @@ async def _eligible_key_helper(
     user_ids: List[str],
     now: Optional[datetime] = None,
 ) -> EligibleKeyResponse:
-    """Fetch every non-expired key that is usable now or can become usable again."""
+    """Fetch non-expired keys that are usable, will reset, or still grant membership."""
 
     requested_user_ids = _normalize_user_id_filters(user_id=None, user_ids=user_ids)
     if not requested_user_ids:
@@ -4253,6 +4261,7 @@ async def _eligible_key_helper(
                   budget_reset_at IS NOT NULL
                   AND (expires IS NULL OR budget_reset_at < expires)
               )
+              OR (key_alias IS NOT NULL AND key_alias <> '')
           )
     """
     rows = await prisma_client.db.query_raw(sql_query, *query_params)
@@ -4265,6 +4274,7 @@ async def _eligible_key_helper(
             budget_reset_at=row.get("budget_reset_at"),
             expires=row.get("expires"),
             now=current_time,
+            key_alias=row.get("key_alias"),
         )
         if availability is None:
             continue
@@ -4305,7 +4315,7 @@ async def list_eligible_keys(
     http_request: Request,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ) -> EligibleKeyResponse:
-    """Return all unexpired keys that have budget now or a reset before expiry."""
+    """Return unexpired keys with budget, a future reset, or active membership."""
 
     try:
         from litellm.proxy.proxy_server import prisma_client
