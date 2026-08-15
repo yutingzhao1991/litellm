@@ -117,6 +117,47 @@ class TestResponsesAPIEndpoints(unittest.TestCase):
     @pytest.mark.asyncio
     @patch("litellm.proxy.proxy_server.llm_router")
     @patch("litellm.proxy.proxy_server.user_api_key_auth")
+    async def test_cursor_chat_completions_streaming_route(self, mock_auth, mock_router):
+        """
+        Test that /cursor/chat/completions streams when the upstream response is
+        streaming. The common request processor passes request= into the injected
+        generator; cursor_data_generator must accept it (regression guard against
+        a 3-arg signature raising TypeError for every streaming request).
+        """
+        mock_auth.return_value = MagicMock(
+            token="test_token",
+            user_id="test_user",
+            team_id=None,
+        )
+
+        async def fake_stream():
+            yield {"choices": [{"delta": {"content": "Hello"}}]}
+            yield {"choices": [{"delta": {"content": " from Cursor"}}]}
+
+        mock_router.aresponses = AsyncMock(return_value=fake_stream())
+
+        client = TestClient(app)
+
+        test_data = {
+            "model": "gpt-4o",
+            "input": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }
+
+        response = client.post(
+            "/cursor/chat/completions",
+            json=test_data,
+            headers={"Authorization": "Bearer sk-1234"},
+        )
+
+        assert response.status_code == 200
+        body = response.text
+        assert "Hello" in body
+        assert " from Cursor" in body
+        assert "[DONE]" in body
+
+    @patch("litellm.proxy.proxy_server.llm_router")
+    @patch("litellm.proxy.proxy_server.user_api_key_auth")
     async def test_responses_api_key_spend_header_includes_response_cost(
         self, mock_auth, mock_router
     ):
