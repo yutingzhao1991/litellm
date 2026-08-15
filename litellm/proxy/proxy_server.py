@@ -5319,10 +5319,39 @@ def _restamp_streaming_chunk_model(
     return chunk, model_mismatch_logged
 
 
+async def _watch_client_disconnect(request: Request) -> None:
+    """
+    Watch for client disconnection while a streaming response is being produced.
+
+    Deep reasoning models can take minutes before producing the first chunk. During
+    that time the server has nothing to yield, so uvicorn cannot observe the
+    disconnection through the generator. This task polls request.is_disconnected()
+    instead; completing normally signals the caller to abandon the upstream stream.
+
+    The task completes ONLY when the client disconnects. It polls for at most 10
+    minutes and then parks itself forever (never completing), so a finished task is
+    always an unambiguous disconnection signal.
+    """
+    try:
+        for _ in range(600):
+            await asyncio.sleep(1)
+            if await request.is_disconnected():
+                return
+        await asyncio.Event().wait()  # park: stop polling, never complete
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        await asyncio.Event().wait()  # polling failed: treat as still connected
+
+
 async def async_data_generator(
-    response, user_api_key_dict: UserAPIKeyAuth, request_data: dict
+    response,
+    user_api_key_dict: UserAPIKeyAuth,
+    request_data: dict,
+    request: Optional[Request] = None,
 ):
     verbose_proxy_logger.debug("inside generator")
+    disconnect_task: Optional[asyncio.Task] = None
     try:
         error_message: Optional[str] = None
         requested_model_from_client = _get_client_requested_model_for_streaming(
@@ -5333,11 +5362,33 @@ async def async_data_generator(
         # Previously "".join(str_so_far_parts) was called every chunk, re-joining
         # the entire accumulated response. String += is O(n) amortized total.
         _str_so_far: str = ""
-        async for chunk in proxy_logging_obj.async_post_call_streaming_iterator_hook(
+        stream_iter = proxy_logging_obj.async_post_call_streaming_iterator_hook(
             user_api_key_dict=user_api_key_dict,
             response=response,
             request_data=request_data,
-        ):
+        ).__aiter__()
+        if request is not None:
+            disconnect_task = asyncio.create_task(_watch_client_disconnect(request))
+        while True:
+            chunk_task = asyncio.create_task(stream_iter.__anext__())
+            waiters = {chunk_task}
+            if disconnect_task is not None and not disconnect_task.done():
+                waiters.add(disconnect_task)
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            if chunk_task not in done:
+                # Client disconnected while waiting for the next upstream chunk.
+                # Abandon the upstream stream; the finally block closes it so the
+                # provider stops generating for a client that is already gone.
+                chunk_task.cancel()
+                verbose_proxy_logger.debug(
+                    "async_data_generator: client disconnected while waiting for upstream chunk"
+                )
+                break
+            try:
+                chunk = chunk_task.result()
+            except StopAsyncIteration:
+                break
+
             ### CALL HOOKS ### - modify outgoing data
             chunk = await proxy_logging_obj.async_post_call_streaming_hook(
                 user_api_key_dict=user_api_key_dict,
@@ -5407,6 +5458,9 @@ async def async_data_generator(
         error_returned = json.dumps({"error": proxy_exception.to_dict()})
         yield f"data: {error_returned}\n\n"
     finally:
+        # Cancel the disconnect watcher so no polling task outlives the stream.
+        if disconnect_task is not None and not disconnect_task.done():
+            disconnect_task.cancel()
         # Close the response stream to release the underlying HTTP connection
         # back to the connection pool. This prevents pool exhaustion when
         # clients disconnect mid-stream.
@@ -5423,12 +5477,16 @@ async def async_data_generator(
 
 
 def select_data_generator(
-    response, user_api_key_dict: UserAPIKeyAuth, request_data: dict
+    response,
+    user_api_key_dict: UserAPIKeyAuth,
+    request_data: dict,
+    request: Optional[Request] = None,
 ):
     return async_data_generator(
         response=response,
         user_api_key_dict=user_api_key_dict,
         request_data=request_data,
+        request=request,
     )
 
 
