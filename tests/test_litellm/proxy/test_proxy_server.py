@@ -3670,6 +3670,126 @@ async def test_async_data_generator_cleanup_on_midstream_error():
     mock_response.aclose.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_async_data_generator_abandons_upstream_on_client_disconnect():
+    """
+    A client that disconnects while the upstream model is still producing its
+    first chunk (e.g. deep reasoning taking minutes) must abandon the upstream
+    stream instead of waiting for it to finish.
+    """
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.proxy.proxy_server import async_data_generator
+    from litellm.proxy.utils import ProxyLogging
+
+    mock_user_api_key_dict = MagicMock(spec=UserAPIKeyAuth)
+    mock_request_data = {
+        "model": "gpt-3.5-turbo",
+        "messages": [{"role": "user", "content": "test"}],
+    }
+
+    release_upstream = asyncio.Event()
+    upstream_was_cancelled = asyncio.Event()
+
+    async def hanging_upstream(*args, **kwargs):
+        try:
+            await release_upstream.wait()
+        finally:
+            upstream_was_cancelled.set()
+        yield {"choices": [{"delta": {"content": "too late"}}]}
+
+    mock_proxy_logging_obj = MagicMock(spec=ProxyLogging)
+    mock_proxy_logging_obj.async_post_call_streaming_iterator_hook = hanging_upstream
+    mock_proxy_logging_obj.async_post_call_streaming_hook = AsyncMock(
+        side_effect=lambda **kwargs: kwargs.get("response")
+    )
+    mock_proxy_logging_obj.post_call_failure_hook = AsyncMock()
+
+    mock_response = MagicMock()
+    mock_response.aclose = AsyncMock()
+
+    mock_request = MagicMock()
+    mock_request.is_disconnected = AsyncMock(return_value=True)
+
+    with patch("litellm.proxy.proxy_server.proxy_logging_obj", mock_proxy_logging_obj):
+        gen = async_data_generator(
+            mock_response,
+            mock_user_api_key_dict,
+            mock_request_data,
+            request=mock_request,
+        )
+        yielded_data = [data async for data in gen]
+
+    # Nothing may be yielded into a dead connection, not even [DONE].
+    assert yielded_data == []
+    # The upstream stream must be closed (propagating cancellation upstream).
+    mock_response.aclose.assert_awaited_once()
+    # The upstream iteration must have been cancelled while waiting for its chunk.
+    await asyncio.wait_for(upstream_was_cancelled.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_async_data_generator_waits_for_upstream_when_client_connected():
+    """
+    A connected client must keep receiving chunks even when the upstream model
+    is slow to produce them (no spurious disconnect handling).
+    """
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.proxy.proxy_server import async_data_generator
+    from litellm.proxy.utils import ProxyLogging
+
+    mock_user_api_key_dict = MagicMock(spec=UserAPIKeyAuth)
+    mock_request_data = {
+        "model": "gpt-3.5-turbo",
+        "messages": [{"role": "user", "content": "test"}],
+    }
+
+    release_upstream = asyncio.Event()
+
+    async def slow_upstream(*args, **kwargs):
+        await release_upstream.wait()
+        yield {"choices": [{"delta": {"content": "finally"}}]}
+
+    mock_proxy_logging_obj = MagicMock(spec=ProxyLogging)
+    mock_proxy_logging_obj.async_post_call_streaming_iterator_hook = slow_upstream
+    mock_proxy_logging_obj.async_post_call_streaming_hook = AsyncMock(
+        side_effect=lambda **kwargs: kwargs.get("response")
+    )
+    mock_proxy_logging_obj.post_call_failure_hook = AsyncMock()
+
+    mock_response = MagicMock()
+    mock_response.aclose = AsyncMock()
+
+    mock_request = MagicMock()
+    mock_request.is_disconnected = AsyncMock(return_value=False)
+
+    with patch("litellm.proxy.proxy_server.proxy_logging_obj", mock_proxy_logging_obj):
+        gen = async_data_generator(
+            mock_response,
+            mock_user_api_key_dict,
+            mock_request_data,
+            request=mock_request,
+        )
+        yielded_data = []
+        consume_task = asyncio.create_task(_collect_stream(gen, yielded_data))
+
+        # Let the disconnect watcher poll a few times while nothing is available.
+        await asyncio.sleep(0.3)
+        assert yielded_data == []
+
+        release_upstream.set()
+        await asyncio.wait_for(consume_task, timeout=5)
+
+    assert len(yielded_data) == 2
+    assert "finally" in yielded_data[0]
+    assert yielded_data[1].startswith("data: [DONE]")
+    mock_response.aclose.assert_awaited_once()
+
+
+async def _collect_stream(gen, target):
+    async for data in gen:
+        target.append(data)
+
+
 # ============================================================================
 # store_model_in_db DB Config Override Tests
 # ============================================================================

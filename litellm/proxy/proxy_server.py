@@ -5328,16 +5328,17 @@ async def _watch_client_disconnect(request: Request) -> None:
     disconnection through the generator. This task polls request.is_disconnected()
     instead; completing normally signals the caller to abandon the upstream stream.
 
-    The task completes ONLY when the client disconnects. It polls for at most 10
-    minutes and then parks itself forever (never completing), so a finished task is
-    always an unambiguous disconnection signal.
+    The task completes ONLY when the client disconnects. Polling has no duration
+    cap: the caller cancels this task from the generator's finally block as soon
+    as the stream settles, so an unbounded loop cannot leak. If polling itself
+    fails, the task parks (never completes) so a finished task is always an
+    unambiguous disconnection signal.
     """
     try:
-        for _ in range(600):
+        while True:
             await asyncio.sleep(1)
             if await request.is_disconnected():
                 return
-        await asyncio.Event().wait()  # park: stop polling, never complete
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -5352,6 +5353,7 @@ async def async_data_generator(
 ):
     verbose_proxy_logger.debug("inside generator")
     disconnect_task: Optional[asyncio.Task] = None
+    client_disconnected = False
     try:
         error_message: Optional[str] = None
         requested_model_from_client = _get_client_requested_model_for_streaming(
@@ -5377,9 +5379,17 @@ async def async_data_generator(
             done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
             if chunk_task not in done:
                 # Client disconnected while waiting for the next upstream chunk.
-                # Abandon the upstream stream; the finally block closes it so the
-                # provider stops generating for a client that is already gone.
+                # Cancel and await the upstream iteration first so the cancellation
+                # fully propagates through CustomStreamWrapper/httpx before the
+                # finally block closes the same underlying stream via
+                # response.aclose() - avoiding two concurrent closes of one stream.
                 chunk_task.cancel()
+                try:
+                    await chunk_task
+                except BaseException:
+                    # CancelledError (or provider-specific errors) are expected here.
+                    pass
+                client_disconnected = True
                 verbose_proxy_logger.debug(
                     "async_data_generator: client disconnected while waiting for upstream chunk"
                 )
@@ -5419,11 +5429,15 @@ async def async_data_generator(
             except Exception as e:
                 yield f"data: {str(e)}\n\n"
 
-        # Streaming is done, yield the [DONE] chunk
-        if error_message is not None:
-            yield error_message
-        done_message = "[DONE]"
-        yield f"data: {done_message}\n\n"
+        # Streaming is done, yield the [DONE] chunk.
+        # Skip all remaining yields when the client already disconnected: nothing
+        # would consume them, and yielding into a dead connection only delays the
+        # finally-block cleanup of the upstream stream.
+        if not client_disconnected:
+            if error_message is not None:
+                yield error_message
+            done_message = "[DONE]"
+            yield f"data: {done_message}\n\n"
     except Exception as e:
         verbose_proxy_logger.exception(
             "litellm.proxy.proxy_server.async_data_generator(): Exception occured - {}".format(
