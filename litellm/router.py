@@ -99,6 +99,9 @@ from litellm.router_utils.cooldown_handlers import (
     _get_cooldown_deployments,
     _set_cooldown_deployments,
 )
+from litellm.router_utils.error_classification import (
+    is_deterministic_tool_schema_error,
+)
 from litellm.router_utils.fallback_event_handlers import (
     _check_non_standard_fallback_format,
     get_fallback_model_group,
@@ -4896,7 +4899,11 @@ class Router:
         original_model_group: Optional[str] = kwargs.get("model")  # type: ignore
         fallback_failure_exception_str = ""
 
-        if disable_fallbacks is True or original_model_group is None:
+        if (
+            disable_fallbacks is True
+            or original_model_group is None
+            or is_deterministic_tool_schema_error(e)
+        ):
             raise e
 
         input_kwargs = {
@@ -5214,6 +5221,12 @@ class Router:
             current_attempt = None
             original_exception = e
             deployment_num_retries = getattr(e, "num_retries", None)
+
+            # Function schema validation failures are deterministic request errors.
+            # An explicit BadRequest retry policy must not resend the same invalid
+            # tools or defer the error to a different model group.
+            if is_deterministic_tool_schema_error(e):
+                raise
 
             if deployment_num_retries is not None and isinstance(
                 deployment_num_retries, int
