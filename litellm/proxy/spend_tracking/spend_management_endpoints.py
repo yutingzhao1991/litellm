@@ -1694,6 +1694,14 @@ async def ui_view_spend_logs(  # noqa: PLR0915
         default="desc",
         description="Sort order: asc or desc",
     ),
+    user_agent_version: Optional[str] = fastapi.Query(
+        default=None,
+        description="Filter logs by client version (matches User-Agent tag 'FeelFish/<version>' prefix)",
+    ),
+    user_agent_os: Optional[str] = fastapi.Query(
+        default=None,
+        description="Filter logs by client OS keyword (matches User-Agent tag substring)",
+    ),
 ):
     """
     View spend logs with pagination support.
@@ -1858,11 +1866,6 @@ async def ui_view_spend_logs(  # noqa: PLR0915
         order_column = sort_by
         order_direction = (sort_order or "desc").lower()
 
-        # Get total count of records
-        total_records = await prisma_client.db.litellm_spendlogs.count(
-            where=where_conditions,
-        )
-
         # Build raw SQL to fetch paginated data WITHOUT heavy columns
         # (messages, response, proxy_server_request can be hundreds of KB per row).
         # These are only needed in the detail endpoint /spend/logs/ui/{request_id}.
@@ -1926,6 +1929,30 @@ async def ui_view_spend_logs(  # noqa: PLR0915
             sql_conditions.append(f"metadata->'error_information'->>'error_message' LIKE ${p}")
             sql_params.append(f"%{error_message}%")
             p += 1
+
+        # Request tags (User-Agent) filters - client version / OS
+        if user_agent_version is not None:
+            sql_conditions.append(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements_text(request_tags) AS t "
+                f"WHERE t ILIKE 'User-Agent: FeelFish/' || ${p} || '%')"
+            )
+            sql_params.append(user_agent_version)
+            p += 1
+        if user_agent_os is not None:
+            sql_conditions.append(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements_text(request_tags) AS t "
+                f"WHERE t ILIKE '%' || ${p} || '%')"
+            )
+            sql_params.append(user_agent_os)
+            p += 1
+
+        # Get total count of records（与列表共用同一 SQL 过滤条件，保证分页与总数一致）
+        count_sql = (
+            f'SELECT COUNT(*) AS cnt FROM "LiteLLM_SpendLogs" '
+            f'WHERE {" AND ".join(sql_conditions)}'
+        )
+        count_result = await prisma_client.db.query_raw(count_sql, *sql_params)
+        total_records = int(count_result[0]["cnt"]) if count_result else 0
 
         # Quote column names that need quoting in SQL
         _sql_col = f'"{order_column}"' if order_column in ("startTime", "endTime") else order_column
