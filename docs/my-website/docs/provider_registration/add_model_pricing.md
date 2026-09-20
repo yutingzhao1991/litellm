@@ -35,13 +35,18 @@ Here's the full specification with all available fields:
         },
         "time_based_pricing": {
             "timezone": "IANA timezone name, e.g. Asia/Shanghai",
+            "calendar": {
+                "holidays": ["YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD, inclusive"],
+                "workdays": ["dates that are workdays although they fall on a weekend"]
+            },
             "rules": [
                 {
                     "name": "optional rule name",
                     "start_time": "HH:MM, inclusive",
                     "end_time": "HH:MM, exclusive",
                     "multiplier": 2.0,
-                    "days": ["optional lowercase weekday names, e.g. mon, tue"]
+                    "days": ["optional lowercase weekday names, e.g. mon, tue"],
+                    "dates": ["optional workday/weekend/holiday/all, or literal dates and ranges"]
                 }
             ]
         },
@@ -104,6 +109,58 @@ Use `time_based_pricing` when a provider charges a multiplier during specific lo
 `start_time` is inclusive and `end_time` is exclusive. For example, `09:00` matches the first rule above, while `12:00` does not.
 
 LiteLLM uses the request start time for cost tracking. Timezone-aware datetimes are recommended; naive datetimes are interpreted in the server's local timezone.
+
+#### Time Based Pricing With Holidays
+
+Some providers charge peak prices only on workdays, and skip peak pricing entirely on weekends and statutory holidays. Their holiday schedules also move some weekends into workdays. Configure `time_based_pricing.calendar` for that, and restrict the peak rules with `dates`.
+
+```json
+{
+    "deepseek-flash": {
+        "input_cost_per_token": 1.5e-07,
+        "output_cost_per_token": 5.8e-07,
+        "litellm_provider": "deepseek",
+        "mode": "chat",
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "calendar": {
+                "holidays": ["2026-09-25..2026-09-27", "2026-10-01..2026-10-07"],
+                "workdays": ["2026-09-20", "2026-10-10"]
+            },
+            "rules": [
+                {
+                    "name": "deepseek_peak_morning",
+                    "start_time": "09:00",
+                    "end_time": "12:00",
+                    "multiplier": 1.6,
+                    "dates": ["workday"]
+                },
+                {
+                    "name": "deepseek_peak_afternoon",
+                    "start_time": "14:00",
+                    "end_time": "18:00",
+                    "multiplier": 1.6,
+                    "dates": ["workday"]
+                }
+            ]
+        }
+    }
+}
+```
+
+`calendar.holidays` lists off days that are not ordinary weekends. `calendar.workdays` lists the days the schedule turns into workdays; a date in both lists counts as a workday. Both accept `"YYYY-MM-DD"` and inclusive `"YYYY-MM-DD..YYYY-MM-DD"` ranges.
+
+`dates` on a rule selects the dates the rule applies to:
+
+- `workday`: not a Saturday/Sunday and not in `holidays`, or listed in `workdays`.
+- `weekend`: Saturday/Sunday and not listed in `workdays`.
+- `holiday`: listed in `holidays`.
+- `all`: every date. This is the default when `dates` is omitted.
+- A literal `"YYYY-MM-DD"` or inclusive `"YYYY-MM-DD..YYYY-MM-DD"`, so a one-off date or promotion needs no calendar entry.
+
+`days` and `dates` are combined with AND when both are present. Note that `days` is a literal weekday filter: a rule with `days: ["mon", "tue", "wed", "thu", "fri"]` will not match an adjusted workday that falls on a Saturday even when `dates: ["workday"]` matches. Prefer `dates: [workday]` alone when the provider's schedule defines the workdays.
+
+An unknown `dates` entry skips the rule. A malformed calendar entry is dropped without disabling the rest of the calendar. With no `calendar`, matching falls back to `days` only.
 
 #### Anthropic Claude
 

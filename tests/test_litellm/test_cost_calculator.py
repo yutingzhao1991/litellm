@@ -1057,6 +1057,475 @@ def test_time_based_pricing_returns_default_for_invalid_config():
     assert result["multiplier"] == 1.0
 
 
+def _deepseek_holiday_model_info() -> dict:
+    """
+    Shape of the deployment config used for DeepSeek peak/off-peak pricing.
+
+    Static prices are off-peak prices; the peak windows multiply them. Statutory
+    holidays and ordinary weekends are off-peak all day, and the weekends the
+    holiday schedule turns into workdays are priced as peak-capable workdays.
+    """
+    return {
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "calendar": {
+                "holidays": ["2026-09-25..2026-09-27", "2026-10-01..2026-10-07"],
+                "workdays": ["2026-09-20", "2026-10-10"],
+            },
+            "rules": [
+                {
+                    "name": "deepseek_peak_morning",
+                    "start_time": "09:00",
+                    "end_time": "12:00",
+                    "multiplier": 1.6,
+                    "days": ["mon", "tue", "wed", "thu", "fri"],
+                    "dates": ["workday"],
+                },
+                {
+                    "name": "deepseek_peak_afternoon",
+                    "start_time": "14:00",
+                    "end_time": "18:00",
+                    "multiplier": 1.6,
+                    "days": ["mon", "tue", "wed", "thu", "fri"],
+                    "dates": ["workday"],
+                },
+            ],
+        }
+    }
+
+
+def _resolve_holiday_pricing(local_datetime):
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    return get_time_based_pricing_result(
+        model_info=_deepseek_holiday_model_info(),
+        pricing_datetime=local_datetime,
+    )
+
+
+def test_calendar_date_classes_resolve_builtin_kinds():
+    from datetime import date
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        _get_date_classes,
+        compile_time_based_pricing_calendar,
+    )
+
+    calendar = compile_time_based_pricing_calendar(_deepseek_holiday_model_info()["time_based_pricing"])
+
+    assert "workday" in _get_date_classes(date(2026, 10, 14), calendar)
+    assert "weekend" in _get_date_classes(date(2026, 10, 17), calendar)
+    assert "holiday" in _get_date_classes(date(2026, 10, 1), calendar)
+    assert "workday" not in _get_date_classes(date(2026, 10, 1), calendar)
+
+
+def test_calendar_range_is_inclusive_on_both_ends():
+    from datetime import date
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        _get_date_classes,
+        compile_time_based_pricing_calendar,
+    )
+
+    calendar = compile_time_based_pricing_calendar(_deepseek_holiday_model_info()["time_based_pricing"])
+
+    for holiday in (date(2026, 10, 1), date(2026, 10, 7)):
+        assert "holiday" in _get_date_classes(holiday, calendar)
+    assert "holiday" not in _get_date_classes(date(2026, 9, 30), calendar)
+    assert "holiday" not in _get_date_classes(date(2026, 10, 8), calendar)
+
+
+def test_calendar_adjusted_weekend_is_a_workday():
+    from datetime import date
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        _get_date_classes,
+        compile_time_based_pricing_calendar,
+    )
+
+    calendar = compile_time_based_pricing_calendar(_deepseek_holiday_model_info()["time_based_pricing"])
+
+    # 2026-09-20 is a Sunday and 2026-10-10 is a Saturday; both are adjusted workdays.
+    for adjusted_workday in (date(2026, 9, 20), date(2026, 10, 10)):
+        classes = _get_date_classes(adjusted_workday, calendar)
+        assert "workday" in classes
+        assert "weekend" not in classes
+
+
+def test_calendar_workday_wins_over_holiday_on_conflict():
+    from datetime import date
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        _get_date_classes,
+        compile_time_based_pricing_calendar,
+    )
+
+    calendar = compile_time_based_pricing_calendar(
+        {
+            "calendar": {
+                "holidays": ["2026-10-01"],
+                "workdays": ["2026-10-01"],
+            }
+        }
+    )
+
+    assert "workday" in _get_date_classes(date(2026, 10, 1), calendar)
+    assert "holiday" not in _get_date_classes(date(2026, 10, 1), calendar)
+
+
+def test_calendar_accepts_object_range_entries():
+    from datetime import date
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        _get_date_classes,
+        compile_time_based_pricing_calendar,
+    )
+
+    calendar = compile_time_based_pricing_calendar(
+        {
+            "calendar": {
+                "holidays": [{"start": "2026-10-01", "end": "2026-10-03"}],
+            }
+        }
+    )
+
+    assert "holiday" in _get_date_classes(date(2026, 10, 2), calendar)
+    assert "holiday" not in _get_date_classes(date(2026, 10, 4), calendar)
+
+
+def test_time_based_pricing_skips_peak_rule_on_statutory_holiday():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    shanghai = ZoneInfo("Asia/Shanghai")
+
+    # 2026-10-01 is a Thursday inside the National Day holiday block.
+    holiday = _resolve_holiday_pricing(datetime(2026, 10, 1, 10, 0, tzinfo=shanghai))
+    assert holiday["multiplier"] == 1.0
+
+    ordinary_workday = _resolve_holiday_pricing(
+        datetime(2026, 10, 14, 10, 0, tzinfo=shanghai)
+    )
+    assert ordinary_workday["multiplier"] == 1.6
+    assert ordinary_workday["rule_name"] == "deepseek_peak_morning"
+
+
+def test_time_based_pricing_skips_peak_rule_on_ordinary_weekend():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    shanghai = ZoneInfo("Asia/Shanghai")
+
+    # 2026-10-17 is a Saturday.
+    weekend = _resolve_holiday_pricing(datetime(2026, 10, 17, 10, 0, tzinfo=shanghai))
+    assert weekend["multiplier"] == 1.0
+
+
+def test_time_based_pricing_applies_peak_rule_on_adjusted_weekend():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    # No `days` filter here: `days` is a literal weekday filter, so combining it
+    # with `dates: [workday]` would force an adjusted workday that falls on a
+    # Saturday to also match `days`. Use the date class alone.
+    model_info = {
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "calendar": {"workdays": ["2026-09-20", "2026-10-10"]},
+            "rules": [
+                {
+                    "name": "deepseek_peak_morning",
+                    "start_time": "09:00",
+                    "end_time": "12:00",
+                    "multiplier": 1.6,
+                    "dates": ["workday"],
+                }
+            ],
+        }
+    }
+    shanghai = ZoneInfo("Asia/Shanghai")
+
+    # 2026-10-10 is a Saturday that the holiday schedule turned into a workday.
+    adjusted = get_time_based_pricing_result(
+        model_info=model_info,
+        pricing_datetime=datetime(2026, 10, 10, 10, 0, tzinfo=shanghai),
+    )
+    assert adjusted["multiplier"] == 1.6
+    assert adjusted["rule_name"] == "deepseek_peak_morning"
+
+    # 2026-09-20 is a Sunday adjusted to a workday.
+    also_adjusted = get_time_based_pricing_result(
+        model_info=model_info,
+        pricing_datetime=datetime(2026, 9, 20, 10, 0, tzinfo=shanghai),
+    )
+    assert also_adjusted["multiplier"] == 1.6
+
+    # 2026-10-11 is a Sunday that is not an adjusted workday.
+    plain_sunday = get_time_based_pricing_result(
+        model_info=model_info,
+        pricing_datetime=datetime(2026, 10, 11, 10, 0, tzinfo=shanghai),
+    )
+    assert plain_sunday["multiplier"] == 1.0
+
+
+def test_time_based_pricing_explicit_dates_work_without_calendar():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    model_info = {
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "rules": [
+                {
+                    "name": "national_day_promo",
+                    "start_time": "09:00",
+                    "end_time": "12:00",
+                    "multiplier": 0.5,
+                    "dates": ["2026-10-01..2026-10-07"],
+                }
+            ],
+        }
+    }
+    shanghai = ZoneInfo("Asia/Shanghai")
+
+    inside = get_time_based_pricing_result(
+        model_info=model_info,
+        pricing_datetime=datetime(2026, 10, 3, 10, 0, tzinfo=shanghai),
+    )
+    assert inside["multiplier"] == 0.5
+
+    outside = get_time_based_pricing_result(
+        model_info=model_info,
+        pricing_datetime=datetime(2026, 10, 8, 10, 0, tzinfo=shanghai),
+    )
+    assert outside["multiplier"] == 1.0
+
+
+def test_time_based_pricing_dates_combine_with_days():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    model_info = {
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "calendar": {"holidays": ["2026-10-05"]},
+            "rules": [
+                {
+                    "name": "peak",
+                    "start_time": "09:00",
+                    "end_time": "12:00",
+                    "multiplier": 2.0,
+                    "days": ["mon"],
+                    "dates": ["workday"],
+                }
+            ],
+        }
+    }
+    shanghai = ZoneInfo("Asia/Shanghai")
+
+    # 2026-10-05 is a Monday but listed as a holiday, so `dates` filters it out.
+    assert (
+        get_time_based_pricing_result(
+            model_info=model_info,
+            pricing_datetime=datetime(2026, 10, 5, 10, 0, tzinfo=shanghai),
+        )["multiplier"]
+        == 1.0
+    )
+    # 2026-10-12 is also a Monday and not a holiday.
+    assert (
+        get_time_based_pricing_result(
+            model_info=model_info,
+            pricing_datetime=datetime(2026, 10, 12, 10, 0, tzinfo=shanghai),
+        )["multiplier"]
+        == 2.0
+    )
+
+
+def test_calendar_missing_keeps_weekday_only_behavior():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    model_info = {
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "rules": [
+                {
+                    "name": "peak",
+                    "start_time": "09:00",
+                    "end_time": "12:00",
+                    "multiplier": 2.0,
+                    "days": ["mon", "tue", "wed", "thu", "fri"],
+                }
+            ],
+        }
+    }
+    shanghai = ZoneInfo("Asia/Shanghai")
+
+    # Without a calendar there is nothing to exclude, so the holiday still peaks.
+    result = get_time_based_pricing_result(
+        model_info=model_info,
+        pricing_datetime=datetime(2026, 10, 1, 10, 0, tzinfo=shanghai),
+    )
+    assert result["multiplier"] == 2.0
+
+
+def test_calendar_malformed_entry_keeps_remaining_dates():
+    from datetime import date
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        _get_date_classes,
+        compile_time_based_pricing_calendar,
+    )
+
+    calendar = compile_time_based_pricing_calendar(
+        {
+            "calendar": {
+                "holidays": ["not-a-date", "2026-10-01", "2026-13-45"],
+            }
+        }
+    )
+
+    assert calendar["invalid_entries"] == ("'not-a-date'", "'2026-13-45'")
+    assert "holiday" in _get_date_classes(date(2026, 10, 1), calendar)
+
+
+def test_time_based_pricing_unknown_date_class_skips_rule():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    model_info = {
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "rules": [
+                {
+                    "name": "typo",
+                    "start_time": "00:00",
+                    "end_time": "00:00",
+                    "multiplier": 3.0,
+                    "dates": ["hoilday"],
+                }
+            ],
+        }
+    }
+
+    result = get_time_based_pricing_result(
+        model_info=model_info,
+        pricing_datetime=datetime(2026, 10, 1, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    assert result["multiplier"] == 1.0
+
+
+def test_completion_cost_uses_request_start_date_across_holiday_boundary():
+    from datetime import datetime, timezone
+
+    model = "openai/test-time-based-holiday-boundary-model"
+    litellm.register_model(
+        {
+            model: {
+                "input_cost_per_token": 0.001,
+                "output_cost_per_token": 0.002,
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "time_based_pricing": {
+                    "timezone": "Asia/Shanghai",
+                    "calendar": {"holidays": ["2026-10-01"]},
+                    "rules": [
+                        {
+                            "name": "peak",
+                            "start_time": "09:00",
+                            "end_time": "12:00",
+                            "multiplier": 2.0,
+                            "days": ["mon", "tue", "wed", "thu", "fri"],
+                            "dates": ["workday"],
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    response = ModelResponse(
+        usage=Usage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
+        model=model,
+    )
+
+    # 2026-09-30 23:50 Asia/Shanghai: a workday, but outside the peak window.
+    before_boundary = litellm.completion_cost(
+        completion_response=response,
+        model=model,
+        custom_llm_provider="openai",
+        pricing_datetime=datetime(2026, 9, 30, 15, 50, tzinfo=timezone.utc),
+    )
+    # 2026-10-01 10:00 Asia/Shanghai: inside the peak window on a holiday.
+    inside_holiday = litellm.completion_cost(
+        completion_response=response,
+        model=model,
+        custom_llm_provider="openai",
+        pricing_datetime=datetime(2026, 10, 1, 2, 0, tzinfo=timezone.utc),
+    )
+
+    assert before_boundary == pytest.approx(0.2)
+    assert inside_holiday == pytest.approx(0.2)
+
+
+def test_completion_cost_applies_holiday_aware_time_based_multiplier():
+    from datetime import datetime, timezone
+
+    model = "openai/test-time-based-holiday-pricing-model"
+    litellm.register_model(
+        {
+            model: {
+                "input_cost_per_token": 0.001,
+                "output_cost_per_token": 0.002,
+                "litellm_provider": "openai",
+                "mode": "chat",
+                **_deepseek_holiday_model_info(),
+            }
+        }
+    )
+    response = ModelResponse(
+        usage=Usage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
+        model=model,
+    )
+
+    workday_peak = litellm.completion_cost(
+        completion_response=response,
+        model=model,
+        custom_llm_provider="openai",
+        pricing_datetime=datetime(2026, 10, 14, 2, 0, tzinfo=timezone.utc),
+    )
+    holiday_peak_hours = litellm.completion_cost(
+        completion_response=response,
+        model=model,
+        custom_llm_provider="openai",
+        pricing_datetime=datetime(2026, 10, 1, 2, 0, tzinfo=timezone.utc),
+    )
+
+    assert workday_peak == pytest.approx(0.32)
+    assert holiday_peak_hours == pytest.approx(0.2)
+
+
 def test_completion_cost_applies_time_based_multiplier():
     from datetime import datetime, timezone
 

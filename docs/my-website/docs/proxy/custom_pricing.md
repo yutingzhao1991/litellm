@@ -112,6 +112,46 @@ time_based_pricing:
       days: ["mon", "tue", "wed", "thu", "fri"]
 ```
 
+### Holidays And Adjusted Workdays
+
+Some providers charge peak prices only on workdays: weekends and statutory holidays are off-peak all day, and the days their holiday schedule turns into workdays are peak-capable workdays again. Configure `calendar` for those dates and restrict the peak rules with `dates`.
+
+```yaml
+model_list:
+  - model_name: deepseek-flash
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+    model_info:
+      input_cost_per_token: 0.00000015
+      output_cost_per_token: 0.00000058
+      cache_read_input_token_cost: 0.0000000029
+      time_based_pricing:
+        timezone: Asia/Shanghai
+        calendar:
+          holidays: ["2026-09-25..2026-09-27", "2026-10-01..2026-10-07"]
+          workdays: ["2026-09-20", "2026-10-10"]
+        rules:
+          - name: deepseek_peak_morning
+            start_time: "09:00"
+            end_time: "12:00"
+            multiplier: 1.6
+            dates: ["workday"]
+          - name: deepseek_peak_afternoon
+            start_time: "14:00"
+            end_time: "18:00"
+            multiplier: 1.6
+            dates: ["workday"]
+```
+
+- `calendar.holidays` lists off days that are not ordinary weekends. `calendar.workdays` lists days that are workdays although they fall on a weekend. A date in both lists counts as a workday.
+- Both accept `"YYYY-MM-DD"` and inclusive `"YYYY-MM-DD..YYYY-MM-DD"` ranges. Repeat them per year; the holiday schedule is published annually.
+- `dates` accepts the classes `workday`, `weekend`, `holiday` and `all`, plus literal dates and inclusive ranges. Omitting `dates` keeps the previous behavior.
+- `days` and `dates` are combined with AND. Because `days` is a literal weekday filter, `days: ["mon", ..., "fri"]` cannot match an adjusted workday on a Saturday; use `dates: [workday]` on its own when the provider's schedule defines workdays.
+- An unknown `dates` entry skips the rule; a malformed calendar entry is dropped without disabling the rest of the calendar.
+
+Set `time_based_pricing` on the deployment as shown above rather than in the shared model cost map. A deployment's `model_info` replaces the whole `time_based_pricing` block from the cost map, so list every rule the deployment should use.
+
 ## Override Model Cost Map
 
 You can override [our model cost map](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) with your own custom pricing for a mapped model.
