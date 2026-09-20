@@ -112,7 +112,7 @@ LiteLLM uses the request start time for cost tracking. Timezone-aware datetimes 
 
 #### Time Based Pricing With Holidays
 
-Some providers charge peak prices only on workdays, and skip peak pricing entirely on weekends and statutory holidays. Their holiday schedules also move some weekends into workdays. Configure `time_based_pricing.calendar` for that, and restrict the peak rules with `dates`.
+Some providers charge peak prices only on workdays, and skip peak pricing entirely on weekends and statutory holidays. Configure `time_based_pricing.calendar` for the holidays, and restrict the peak rules with `dates`.
 
 ```json
 {
@@ -124,8 +124,7 @@ Some providers charge peak prices only on workdays, and skip peak pricing entire
         "time_based_pricing": {
             "timezone": "Asia/Shanghai",
             "calendar": {
-                "holidays": ["2026-09-25..2026-09-27", "2026-10-01..2026-10-07"],
-                "workdays": ["2026-09-20", "2026-10-10"]
+                "holidays": ["2026-09-25..2026-09-27", "2026-10-01..2026-10-07"]
             },
             "rules": [
                 {
@@ -148,17 +147,19 @@ Some providers charge peak prices only on workdays, and skip peak pricing entire
 }
 ```
 
-`calendar.holidays` lists off days that are not ordinary weekends. `calendar.workdays` lists the days the schedule turns into workdays; a date in both lists counts as a workday. Both accept `"YYYY-MM-DD"` and inclusive `"YYYY-MM-DD..YYYY-MM-DD"` ranges.
+`calendar.holidays` lists off days that are not ordinary weekends, and accepts `"YYYY-MM-DD"` and inclusive `"YYYY-MM-DD..YYYY-MM-DD"` ranges. DeepSeek bills every Saturday and Sunday at the off-peak price, including the weekends its holiday schedule turns into workdays, so a DeepSeek entry needs no further calendar data.
 
 `dates` on a rule selects the dates the rule applies to:
 
 - `workday`: not a Saturday/Sunday and not in `holidays`, or listed in `workdays`.
-- `weekend`: Saturday/Sunday and not listed in `workdays`.
+- `weekend`: Saturday/Sunday, unless `workdays` overrides it (see below).
 - `holiday`: listed in `holidays`.
 - `all`: every date. This is the default when `dates` is omitted.
 - A literal `"YYYY-MM-DD"` or inclusive `"YYYY-MM-DD..YYYY-MM-DD"`, so a one-off date or promotion needs no calendar entry.
 
-`days` and `dates` are combined with AND when both are present. Note that `days` is a literal weekday filter: a rule with `days: ["mon", "tue", "wed", "thu", "fri"]` will not match an adjusted workday that falls on a Saturday even when `dates: ["workday"]` matches. Prefer `dates: [workday]` alone when the provider's schedule defines the workdays.
+`days` and `dates` are combined with AND when both are present. Note that `days` is a literal weekday filter: a rule with `days: ["mon", "tue", "wed", "thu", "fri"]` will never match a Saturday or Sunday, even when `dates: ["workday"]` matches one. Prefer `dates` alone when the date classes already express the provider's policy.
+
+`calendar.workdays` is an optional override for the rarer provider that does charge peak on a weekend its holiday schedule turns into a workday; such a date becomes `workday` instead of `weekend`. A date listed in both `holidays` and `workdays` counts as a workday. Leave it unset when every weekend is off-peak.
 
 An unknown `dates` entry invalidates the whole list and skips the rule, so a typo never leaves a rule half-applied. A malformed calendar entry is dropped without disabling the rest of the calendar. With no `calendar`, matching falls back to `days` only.
 

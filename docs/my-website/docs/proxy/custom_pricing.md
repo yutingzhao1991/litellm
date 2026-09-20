@@ -114,7 +114,7 @@ time_based_pricing:
 
 ### Holidays And Adjusted Workdays
 
-Some providers charge peak prices only on workdays: weekends and statutory holidays are off-peak all day, and the days their holiday schedule turns into workdays are peak-capable workdays again. Configure `calendar` for those dates and restrict the peak rules with `dates`.
+Some providers charge peak prices only on workdays: weekends and statutory holidays are off-peak all day. Configure `calendar` for the holidays and restrict the peak rules with `dates`.
 
 ```yaml
 model_list:
@@ -130,7 +130,6 @@ model_list:
         timezone: Asia/Shanghai
         calendar:
           holidays: ["2026-09-25..2026-09-27", "2026-10-01..2026-10-07"]
-          workdays: ["2026-09-20", "2026-10-10"]
         rules:
           - name: deepseek_peak_morning
             start_time: "09:00"
@@ -144,10 +143,10 @@ model_list:
             dates: ["workday"]
 ```
 
-- `calendar.holidays` lists off days that are not ordinary weekends. `calendar.workdays` lists days that are workdays although they fall on a weekend. A date in both lists counts as a workday.
+- `calendar.holidays` lists off days that are not ordinary weekends. `calendar.workdays` is an optional override for the rarer provider that does charge peak on a weekend its holiday schedule turns into a workday; a date in both lists counts as a workday. DeepSeek bills every weekend at the off-peak price, so leave it unset there.
 - Both accept `"YYYY-MM-DD"` and inclusive `"YYYY-MM-DD..YYYY-MM-DD"` ranges. Repeat them per year; the holiday schedule is published annually.
 - `dates` accepts the classes `workday`, `weekend`, `holiday` and `all`, plus literal dates and inclusive ranges. Omitting `dates` keeps the previous behavior.
-- `days` and `dates` are combined with AND. Because `days` is a literal weekday filter, `days: ["mon", ..., "fri"]` cannot match an adjusted workday on a Saturday; use `dates: [workday]` on its own when the provider's schedule defines workdays.
+- `days` and `dates` are combined with AND. Because `days` is a literal weekday filter, `days: ["mon", ..., "fri"]` can never match a Saturday or Sunday even when `dates: [workday]` matches one; prefer `dates` alone when the date classes already express the policy.
 - An unknown `dates` entry invalidates the whole list and skips the rule, so a typo never leaves a rule half-applied. A malformed calendar entry is dropped without disabling the rest of the calendar.
 
 Set `time_based_pricing` on the deployment as shown above rather than in the shared model cost map. A deployment's `model_info` replaces the whole `time_based_pricing` block from the cost map, so list every rule the deployment should use.

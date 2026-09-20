@@ -301,9 +301,10 @@ def _get_date_classes(
 ) -> FrozenSet[str]:
     """Return the calendar classes satisfied by a local date.
 
-    `workdays` (调休上班) wins over `holidays` and over the natural weekend rule:
-    an explicit "people work this day" instruction should not be cancelled by a
-    range entry.
+    A date in `calendar.workdays` is a workday even when it falls on a weekend.
+    That override is for providers that charge peak on an adjusted weekend;
+    providers that bill every weekend as off-peak leave `workdays` unset, and
+    those dates keep the natural `weekend` class.
     """
     holiday_dates = calendar["holiday_dates"]
     workday_dates = calendar["workday_dates"]

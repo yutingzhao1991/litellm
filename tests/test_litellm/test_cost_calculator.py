@@ -1061,16 +1061,16 @@ def _deepseek_holiday_model_info() -> dict:
     """
     Shape of the deployment config used for DeepSeek peak/off-peak pricing.
 
-    Static prices are off-peak prices; the peak windows multiply them. Statutory
-    holidays and ordinary weekends are off-peak all day, and the weekends the
-    holiday schedule turns into workdays are priced as peak-capable workdays.
+    Static prices are off-peak prices; the peak windows multiply them. Weekends
+    (including the ones the holiday schedule turns into workdays) and statutory
+    holidays are off-peak all day, so the peak rules are restricted to the
+    `workday` date class and no `calendar.workdays` override is configured.
     """
     return {
         "time_based_pricing": {
             "timezone": "Asia/Shanghai",
             "calendar": {
                 "holidays": ["2026-09-25..2026-09-27", "2026-10-01..2026-10-07"],
-                "workdays": ["2026-09-20", "2026-10-10"],
             },
             "rules": [
                 {
@@ -1078,7 +1078,6 @@ def _deepseek_holiday_model_info() -> dict:
                     "start_time": "09:00",
                     "end_time": "12:00",
                     "multiplier": 1.6,
-                    "days": ["mon", "tue", "wed", "thu", "fri"],
                     "dates": ["workday"],
                 },
                 {
@@ -1086,7 +1085,6 @@ def _deepseek_holiday_model_info() -> dict:
                     "start_time": "14:00",
                     "end_time": "18:00",
                     "multiplier": 1.6,
-                    "days": ["mon", "tue", "wed", "thu", "fri"],
                     "dates": ["workday"],
                 },
             ],
@@ -1137,7 +1135,12 @@ def test_calendar_range_is_inclusive_on_both_ends():
     assert "holiday" not in _get_date_classes(date(2026, 10, 8), calendar)
 
 
-def test_calendar_adjusted_weekend_is_a_workday():
+def test_calendar_workdays_override_marks_a_weekend_as_workday():
+    """
+    `calendar.workdays` is a general override for providers that do charge peak on
+    a weekend the holiday schedule turned into a workday. DeepSeek does not, which
+    is why its own config leaves the override unset.
+    """
     from datetime import date
 
     from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
@@ -1145,13 +1148,40 @@ def test_calendar_adjusted_weekend_is_a_workday():
         compile_time_based_pricing_calendar,
     )
 
-    calendar = compile_time_based_pricing_calendar(_deepseek_holiday_model_info()["time_based_pricing"])
+    calendar = compile_time_based_pricing_calendar(
+        {"calendar": {"workdays": ["2026-09-20", "2026-10-10"]}}
+    )
 
-    # 2026-09-20 is a Sunday and 2026-10-10 is a Saturday; both are adjusted workdays.
+    # 2026-09-20 is a Sunday and 2026-10-10 is a Saturday; both are listed as workdays.
     for adjusted_workday in (date(2026, 9, 20), date(2026, 10, 10)):
         classes = _get_date_classes(adjusted_workday, calendar)
         assert "workday" in classes
         assert "weekend" not in classes
+
+    # A weekend that is not listed stays a weekend.
+    assert "weekend" in _get_date_classes(date(2026, 10, 11), calendar)
+
+
+def test_calendar_adjusted_weekend_is_off_peak_without_override():
+    """
+    DeepSeek bills every Saturday and Sunday at the off-peak price, including the
+    weekends the holiday schedule turns into workdays.
+    """
+    from datetime import date
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        _get_date_classes,
+        compile_time_based_pricing_calendar,
+    )
+
+    calendar = compile_time_based_pricing_calendar(
+        _deepseek_holiday_model_info()["time_based_pricing"]
+    )
+
+    for adjusted_weekend in (date(2026, 9, 20), date(2026, 10, 10)):
+        classes = _get_date_classes(adjusted_weekend, calendar)
+        assert "weekend" in classes
+        assert "workday" not in classes
 
 
 def test_calendar_workday_wins_over_holiday_on_conflict():
@@ -1223,7 +1253,7 @@ def test_time_based_pricing_skips_peak_rule_on_ordinary_weekend():
     assert weekend["multiplier"] == 1.0
 
 
-def test_time_based_pricing_applies_peak_rule_on_adjusted_weekend():
+def test_time_based_pricing_applies_peak_rule_on_adjusted_weekend_with_override():
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -1231,16 +1261,18 @@ def test_time_based_pricing_applies_peak_rule_on_adjusted_weekend():
         get_time_based_pricing_result,
     )
 
-    # No `days` filter here: `days` is a literal weekday filter, so combining it
-    # with `dates: [workday]` would force an adjusted workday that falls on a
-    # Saturday to also match `days`. Use the date class alone.
+    # `calendar.workdays` is the general override for providers that DO charge peak
+    # on an adjusted weekend. DeepSeek is not such a provider; this test covers the
+    # override mechanism itself. Note there is no `days` filter here: `days` is a
+    # literal weekday filter, so pairing it with `dates: [workday]` would stop an
+    # adjusted weekend from ever matching.
     model_info = {
         "time_based_pricing": {
             "timezone": "Asia/Shanghai",
             "calendar": {"workdays": ["2026-09-20", "2026-10-10"]},
             "rules": [
                 {
-                    "name": "deepseek_peak_morning",
+                    "name": "peak_morning",
                     "start_time": "09:00",
                     "end_time": "12:00",
                     "multiplier": 1.6,
@@ -1257,7 +1289,7 @@ def test_time_based_pricing_applies_peak_rule_on_adjusted_weekend():
         pricing_datetime=datetime(2026, 10, 10, 10, 0, tzinfo=shanghai),
     )
     assert adjusted["multiplier"] == 1.6
-    assert adjusted["rule_name"] == "deepseek_peak_morning"
+    assert adjusted["rule_name"] == "peak_morning"
 
     # 2026-09-20 is a Sunday adjusted to a workday.
     also_adjusted = get_time_based_pricing_result(
@@ -1266,12 +1298,37 @@ def test_time_based_pricing_applies_peak_rule_on_adjusted_weekend():
     )
     assert also_adjusted["multiplier"] == 1.6
 
-    # 2026-10-11 is a Sunday that is not an adjusted workday.
+    # 2026-10-11 is a Sunday that is not listed as an adjusted workday.
     plain_sunday = get_time_based_pricing_result(
         model_info=model_info,
         pricing_datetime=datetime(2026, 10, 11, 10, 0, tzinfo=shanghai),
     )
     assert plain_sunday["multiplier"] == 1.0
+
+
+def test_time_based_pricing_keeps_adjusted_weekend_off_peak_for_deepseek():
+    """
+    The shipped DeepSeek config has no `calendar.workdays`, so the weekends the
+    2026 holiday schedule turns into workdays stay at the off-peak price while an
+    ordinary workday in the same window is charged the peak price.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    shanghai = ZoneInfo("Asia/Shanghai")
+
+    for adjusted_weekend in (
+        datetime(2026, 10, 10, 10, 0, tzinfo=shanghai),  # Saturday
+        datetime(2026, 9, 20, 10, 0, tzinfo=shanghai),   # Sunday
+    ):
+        assert _resolve_holiday_pricing(adjusted_weekend)["multiplier"] == 1.0
+
+    assert (
+        _resolve_holiday_pricing(datetime(2026, 10, 14, 10, 0, tzinfo=shanghai))[
+            "multiplier"
+        ]
+        == 1.6
+    )
 
 
 def test_time_based_pricing_explicit_dates_work_without_calendar():

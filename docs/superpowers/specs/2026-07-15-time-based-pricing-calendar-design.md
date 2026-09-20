@@ -9,25 +9,26 @@
 
 `time_based_pricing` (see `2026-06-30-time-based-pricing-design.md`) supports `timezone`, `start_time` / `end_time`, `multiplier` and an optional weekday filter `days`. It has no calendar-date dimension: the original design explicitly listed "calendar-date-specific holiday pricing" as a non-goal.
 
-DeepSeek's published peak/off-peak policy now makes that dimension load-bearing. Per DeepSeek's 2026-09-19 peak/off-peak notice, three classes of days are priced differently:
+DeepSeek's published peak/off-peak policy now makes that dimension load-bearing. Per DeepSeek's 2026-09-19 peak/off-peak notice, two classes of days are priced differently:
 
 | Day | Billing |
 | --- | --- |
-| Ordinary workday | peak window `/ off-peak window` |
-| Ordinary Saturday / Sunday | off-peak all day |
+| Workday that is not a statutory holiday | peak window / off-peak window |
+| Saturday, Sunday (including weekends the holiday schedule turns into workdays, 调休) | off-peak all day |
 | Statutory holiday (including a multi-day National Day block) | off-peak all day |
-| Weekend that the holiday schedule turns into a workday (调休) | peak window / off-peak window |
 
 Two consequences follow:
 
-1. A holiday exclusion alone is wrong. The adjusted weekends in the same notice must be treated as workdays, so "skip holidays" produces off-peak pricing on exactly the days the provider charges peak.
-2. A weekday filter alone is wrong. Statutory holidays contain weekdays, and adjusted workdays are weekends, so `days: [mon..fri]` misprices both.
+1. A holiday exclusion is mandatory. Without it, statutory holidays that fall on a weekday are billed at peak, which is exactly what the provider does not charge.
+2. A weekday filter alone is not enough either: `days: [mon..fri]` happens to align with this particular policy, but it cannot express the holiday exclusion, and it silently becomes wrong for any provider that does charge peak on an adjusted weekend. Date classes express the policy directly.
 
-The cost map therefore needs an explicit holiday calendar with its adjusted workdays. This design adds it as configuration data inside `time_based_pricing` itself: no external loader, no new file format, no code path that can silently fail to find a calendar file.
+The cost map therefore needs an explicit holiday calendar. This design adds it as configuration data inside `time_based_pricing` itself: no external loader, no new file format, no code path that can silently fail to find a calendar file.
+
+`calendar.workdays` exists as a general override for providers whose schedule does charge peak on an adjusted weekend. DeepSeek is not one of them: every Saturday and Sunday is off-peak all day, so a DeepSeek entry should leave `calendar.workdays` unset.
 
 ## Goals
 
-- Let a rule declare which calendar dates it applies to, including statutory holidays, adjusted workdays and ordinary weekends.
+- Let a rule declare which calendar dates it applies to, including statutory holidays, ordinary weekends, and (for providers that need it) weekends their schedule turns into workdays.
 - Keep the entire calendar inside `time_based_pricing`, so one model entry is self-describing and reviewable in a diff.
 - Be fully backward compatible: existing configs (including the current deepseek entries, which use only time windows) keep their exact behavior.
 - Degrade to today's behavior when date config is absent or malformed. Never raise, never fail a model call.
@@ -52,28 +53,27 @@ time_based_pricing:
   # Calendar data. Lists of "YYYY-MM-DD" or "YYYY-MM-DD..YYYY-MM-DD" ranges.
   calendar:
     holidays: ["2026-09-25..2026-09-27", "2026-10-01..2026-10-07"]
-    workdays: ["2026-09-20", "2026-10-10"]
 
   rules:
-    # off-peak window on an ordinary workday
-    - name: deepseek_off_peak_workday
-      start_time: "00:30"
-      end_time: "08:30"
-      multiplier: 0.5
+    # Peak windows apply on workdays only. Weekends and the holidays listed above
+    # fall through to the static price, which is the off-peak price.
+    - name: deepseek_peak_morning
+      start_time: "09:00"
+      end_time: "12:00"
+      multiplier: 1.6
       dates: [workday]
 
-    # off-peak all day on weekends and statutory holidays
-    - name: deepseek_off_peak_weekend_holiday
-      start_time: "00:00"
-      end_time: "00:00"
-      multiplier: 0.5
-      dates: [weekend, holiday]
+    - name: deepseek_peak_afternoon
+      start_time: "14:00"
+      end_time: "18:00"
+      multiplier: 1.6
+      dates: [workday]
 ```
 
 ### `calendar`
 
 - `holidays`: dates that are off but are not ordinary weekends. Used by the `holiday` date class.
-- `workdays`: dates that are workdays although they fall on a weekend (调休上班). Used by the `workday` date class.
+- `workdays`: optional override for providers that do charge peak on a weekend the holiday schedule turned into a workday; such dates become `workday` instead of `weekend`. Leave it unset when every Saturday and Sunday is off-peak.
 - Both accept `"YYYY-MM-DD"` and inclusive `"YYYY-MM-DD..YYYY-MM-DD"` range strings, or a raw `{start, end}` object in JSON cost-map entries.
 - `workdays` wins over `holidays` and over the natural weekend rule if a date appears in both. That is the safe direction: an explicit "people work this day" instruction should not be cancelled by a sloppy range.
 - An empty or absent `calendar` is valid and means "no calendar data".
@@ -83,7 +83,7 @@ time_based_pricing:
 Each rule may declare `dates`, a list of classes evaluated in the rule's timezone:
 
 - `workday`: not a Saturday/Sunday, and not in `calendar.holidays`, or explicitly listed in `calendar.workdays`.
-- `weekend`: Saturday/Sunday and not listed in `calendar.workdays`.
+- `weekend`: Saturday/Sunday and not listed in `calendar.workdays`. Every adjusted weekend is off-peak unless the provider's calendar says otherwise, so this is the correct class for a DeepSeek-style policy.
 - `holiday`: listed in `calendar.holidays`.
 - `all`: every date. This is the default when `dates` is omitted.
 - `"YYYY-MM-DD"` or `"YYYY-MM-DD..YYYY-MM-DD"`: explicit literal date or inclusive range, allowed inline so one-off promotions do not need a calendar.
@@ -94,6 +94,7 @@ An unknown entry invalidates the whole `dates` list, so the rule is skipped with
 
 - `dates` omitted: current behavior exactly. `days`, when present, filters by `local_datetime.weekday()`.
 - `dates` present: the date class decides. `days`, if also present, is applied as an additional filter on top (`dates AND days`). This lets a config say "workdays, Monday through Thursday only" without needing new classes.
+- Because `days` is a literal weekday filter, `days: [mon..fri]` combined with `dates: [workday]` can never match an adjusted weekend. That is the desired outcome for DeepSeek (weekends are off-peak regardless), but it would be wrong for a provider that charges peak on adjusted weekends. Prefer `dates` alone when the date classes alone express the policy.
 - `dates: [all]` is equivalent to omitting `dates` for class purposes but still composes with `days`.
 
 ### Full-day windows
@@ -183,7 +184,8 @@ Rule matching:
 - Existing config with no `dates` produces identical results to the current tests (regression guard).
 - A `dates: [holiday]` full-day rule matches 2026-10-01 at 10:00 Asia/Shanghai and does not match 2026-10-12.
 - A `dates: [workday]` rule does not match within the configured holiday block.
-- 2026-09-20 and 2026-10-10 (the adjusted workdays) match `workday` and not `weekend`.
+- With a DeepSeek-shaped config (no `workdays`), 2026-09-20 and 2026-10-10 resolve to `weekend`, so the peak rules do not match them.
+- With `calendar.workdays` set, those same dates resolve to `workday` and the peak rules do match.
 - `dates` combined with `days` requires both.
 - Unknown date class skips the rule.
 
@@ -236,4 +238,4 @@ If the cost map is used anyway, keep the schema change (the `calendar` / `dates`
 3. Mirror the semantics in the desktop resolver and add matching tests.
 4. Update `docs/my-website/docs/provider_registration/add_model_pricing.md` and `docs/my-website/docs/proxy/custom_pricing.md` with the `calendar` and `dates` fields, the full-day window form, the whole-block-replacement caveat, and the DeepSeek example.
 
-A reduced first step is acceptable if the full calendar is too much at once: implement `dates` with literal dates and ranges only, list the current holiday block and adjusted workdays explicitly in the model entry, and add the `holiday` / `workday` / `weekend` classes in a follow-up. The schema above is forward compatible with that split.
+A reduced first step is acceptable if the full calendar is too much at once: implement `dates` with literal dates and ranges only, list the current holiday block explicitly in the model entry, and add the `holiday` / `weekday` / `weekend` classes in a follow-up. The schema above is forward compatible with that split.
