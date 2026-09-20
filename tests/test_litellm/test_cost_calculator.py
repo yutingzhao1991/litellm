@@ -1407,6 +1407,88 @@ def test_calendar_malformed_entry_keeps_remaining_dates():
     assert "holiday" in _get_date_classes(date(2026, 10, 1), calendar)
 
 
+def test_time_based_pricing_full_day_window_covers_every_time():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    model_info = {
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "calendar": {"holidays": ["2026-10-01"]},
+            "rules": [
+                {
+                    "name": "holiday_all_day",
+                    "start_time": "00:00",
+                    "end_time": "00:00",
+                    "multiplier": 0.5,
+                    "dates": ["holiday"],
+                }
+            ],
+        }
+    }
+    shanghai = ZoneInfo("Asia/Shanghai")
+
+    # `00:00`-`00:00` is a full-day window, not a zero-length one.
+    for hour in (0, 9, 12, 23):
+        result = get_time_based_pricing_result(
+            model_info=model_info,
+            pricing_datetime=datetime(2026, 10, 1, hour, 0, tzinfo=shanghai),
+        )
+        assert result["multiplier"] == 0.5, f"hour={hour}"
+        assert result["rule_name"] == "holiday_all_day"
+
+
+def test_time_based_pricing_partially_invalid_dates_skips_rule():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        get_time_based_pricing_result,
+    )
+
+    model_info = {
+        "time_based_pricing": {
+            "timezone": "Asia/Shanghai",
+            "rules": [
+                {
+                    "name": "typo_mixed_with_valid",
+                    "start_time": "00:00",
+                    "end_time": "00:00",
+                    "multiplier": 2.0,
+                    # "workday" alone would match; one bad entry must skip the rule.
+                    "dates": ["workday", "hoilday"],
+                }
+            ],
+        }
+    }
+
+    result = get_time_based_pricing_result(
+        model_info=model_info,
+        pricing_datetime=datetime(2026, 10, 14, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    assert result["multiplier"] == 1.0
+
+
+def test_calendar_date_max_does_not_break_the_calendar():
+    from datetime import date
+
+    from litellm.litellm_core_utils.llm_cost_calc.time_based_pricing import (
+        _get_date_classes,
+        compile_time_based_pricing_calendar,
+    )
+
+    calendar = compile_time_based_pricing_calendar(
+        {"calendar": {"holidays": ["9999-12-31", "2026-10-01"]}}
+    )
+
+    assert "holiday" in _get_date_classes(date(9999, 12, 31), calendar)
+    assert "holiday" in _get_date_classes(date(2026, 10, 1), calendar)
+
+
 def test_time_based_pricing_unknown_date_class_skips_rule():
     from datetime import datetime
     from zoneinfo import ZoneInfo

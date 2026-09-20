@@ -160,7 +160,7 @@ Some providers charge peak prices only on workdays, and skip peak pricing entire
 
 `days` and `dates` are combined with AND when both are present. Note that `days` is a literal weekday filter: a rule with `days: ["mon", "tue", "wed", "thu", "fri"]` will not match an adjusted workday that falls on a Saturday even when `dates: ["workday"]` matches. Prefer `dates: [workday]` alone when the provider's schedule defines the workdays.
 
-An unknown `dates` entry skips the rule. A malformed calendar entry is dropped without disabling the rest of the calendar. With no `calendar`, matching falls back to `days` only.
+An unknown `dates` entry invalidates the whole list and skips the rule, so a typo never leaves a rule half-applied. A malformed calendar entry is dropped without disabling the rest of the calendar. With no `calendar`, matching falls back to `days` only.
 
 #### Anthropic Claude
 

@@ -86,7 +86,15 @@ def _parse_days(days: Any) -> Optional[List[int]]:
 
 
 def _is_time_in_window(local_time: time, start_time: time, end_time: time) -> bool:
-    if start_time <= end_time:
+    """Match a local wall-clock time against a rule window.
+
+    Start is inclusive and end is exclusive. `start == end` means the whole day,
+    which is how a rule such as "holidays are off-peak all day" is expressed.
+    `start > end` wraps past midnight.
+    """
+    if start_time == end_time:
+        return True
+    if start_time < end_time:
         return start_time <= local_time < end_time
 
     return local_time >= start_time or local_time < end_time
@@ -177,6 +185,10 @@ def _collect_calendar_dates(
         current = start
         while current <= end:
             collected.append(current)
+            # Stop at the range end: adding a day to `date.max` overflows, and one
+            # such entry must not take down the whole calendar.
+            if current == end:
+                break
             current += timedelta(days=1)
 
     return collected, invalid
@@ -258,6 +270,10 @@ def _parse_rule_dates(
 
     Returns None when the rule does not restrict by date (missing `dates`), an
     empty list when the config is unusable, otherwise the normalized entries.
+
+    One unrecognized entry makes the whole list unusable, so a rule with a typo
+    such as `["workday", "hoilday"]` is skipped instead of silently applying to
+    workdays. Partial-validity here would make a bad config look like it works.
     """
     if raw_dates is None:
         return None
@@ -268,7 +284,13 @@ def _parse_rule_dates(
     for entry in raw_dates:
         if not isinstance(entry, str) or not entry.strip():
             return []
-        normalized.append(entry.strip().lower())
+        candidate = entry.strip().lower()
+        if candidate in _RESERVED_DATE_CLASSES:
+            normalized.append(candidate)
+            continue
+        if _parse_calendar_entry(candidate) is None:
+            return []
+        normalized.append(candidate)
 
     return normalized
 

@@ -88,7 +88,7 @@ Each rule may declare `dates`, a list of classes evaluated in the rule's timezon
 - `all`: every date. This is the default when `dates` is omitted.
 - `"YYYY-MM-DD"` or `"YYYY-MM-DD..YYYY-MM-DD"`: explicit literal date or inclusive range, allowed inline so one-off promotions do not need a calendar.
 
-An unknown class name invalidates the rule (skipped, debug log), matching how an unknown `days` value already behaves.
+An unknown entry invalidates the whole `dates` list, so the rule is skipped with a debug log. Validation covers every entry before any matching: a rule written as `dates: ["workday", "hoilday"]` is skipped entirely rather than silently applying on workdays. This matches how an unknown `days` value already behaves.
 
 ### Interaction with `days`
 
@@ -98,7 +98,7 @@ An unknown class name invalidates the rule (skipped, debug log), matching how an
 
 ### Full-day windows
 
-`start_time: "00:00"` with `end_time: "00:00"` means the whole day. The existing window helper already handles the wrap case (`start >= end` → `local >= start or local < end`), and a zero-length window is the only reading that makes sense for a full-day rule. Configs that want the whole day should use this form rather than four overlapping windows.
+`start_time: "00:00"` with `end_time: "00:00"` means the whole day. The window helper returns True whenever `start_time == end_time`, so a full-day rule matches at every wall-clock time including both midnights; `start_time > end_time` keeps its existing wrap-past-midnight meaning. Configs that want the whole day should use this form rather than four overlapping windows.
 
 ## Architecture
 

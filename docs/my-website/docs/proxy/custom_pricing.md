@@ -148,7 +148,7 @@ model_list:
 - Both accept `"YYYY-MM-DD"` and inclusive `"YYYY-MM-DD..YYYY-MM-DD"` ranges. Repeat them per year; the holiday schedule is published annually.
 - `dates` accepts the classes `workday`, `weekend`, `holiday` and `all`, plus literal dates and inclusive ranges. Omitting `dates` keeps the previous behavior.
 - `days` and `dates` are combined with AND. Because `days` is a literal weekday filter, `days: ["mon", ..., "fri"]` cannot match an adjusted workday on a Saturday; use `dates: [workday]` on its own when the provider's schedule defines workdays.
-- An unknown `dates` entry skips the rule; a malformed calendar entry is dropped without disabling the rest of the calendar.
+- An unknown `dates` entry invalidates the whole list and skips the rule, so a typo never leaves a rule half-applied. A malformed calendar entry is dropped without disabling the rest of the calendar.
 
 Set `time_based_pricing` on the deployment as shown above rather than in the shared model cost map. A deployment's `model_info` replaces the whole `time_based_pricing` block from the cost map, so list every rule the deployment should use.
 
