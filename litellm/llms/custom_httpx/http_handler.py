@@ -3,6 +3,7 @@ import os
 import ssl
 import sys
 import time
+import weakref
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -50,6 +51,26 @@ try:
     from litellm._version import version
 except Exception:
     version = "0.0.0"
+
+
+def _drop_streaming_anchor(_handler: object) -> None:
+    """Release the reference held until the streaming response is collected."""
+
+
+def _anchor_handler_to(response: httpx.Response, handler: object) -> None:
+    """Keep the handler alive while its streaming response can still read.
+
+    Backported from BerriAI/litellm#34829. A response holds its connection,
+    but not the handler whose finalizer closes the connection pool. Cache
+    eviction must not allow that finalizer to interrupt an in-flight stream.
+
+    The finalizer registry holds the handler outside the response's reference
+    cycle. When the response is collected, releasing the anchor lets the handler
+    schedule its ordinary async cleanup rather than losing its session in the
+    same cyclic collection. Each concurrent response holds a separate anchor.
+    """
+    weakref.finalize(response, _drop_streaming_anchor, handler)
+
 
 def get_default_headers() -> dict:
     """
@@ -464,6 +485,8 @@ class AsyncHTTPHandler:
                 content=request_content,
             )
             response = await self.client.send(req, stream=stream)
+            if stream:
+                _anchor_handler_to(response, self)
             response.raise_for_status()
             return response
         except (httpx.RemoteProtocolError, httpx.ConnectError):
@@ -668,6 +691,8 @@ class AsyncHTTPHandler:
                 "DELETE", url, data=request_data, json=json, params=params, headers=headers, timeout=timeout, content=request_content  # type: ignore
             )
             response = await self.client.send(req, stream=stream)
+            if stream:
+                _anchor_handler_to(response, self)
             response.raise_for_status()
             return response
         except (httpx.RemoteProtocolError, httpx.ConnectError):
@@ -1024,6 +1049,8 @@ class HTTPHandler:
                     "POST", url, data=request_data, json=json, params=params, headers=headers, files=files, content=request_content  # type: ignore
                 )
             response = self.client.send(req, stream=stream)
+            if stream:
+                _anchor_handler_to(response, self)
             response.raise_for_status()
             return response
         except httpx.TimeoutException:
@@ -1072,6 +1099,8 @@ class HTTPHandler:
                     "PATCH", url, data=request_data, json=json, params=params, headers=headers, content=request_content  # type: ignore
                 )
             response = self.client.send(req, stream=stream)
+            if stream:
+                _anchor_handler_to(response, self)
             response.raise_for_status()
             return response
         except httpx.TimeoutException:
@@ -1121,6 +1150,8 @@ class HTTPHandler:
                     "PUT", url, data=request_data, json=json, params=params, headers=headers, content=request_content  # type: ignore
                 )
             response = self.client.send(req, stream=stream)
+            if stream:
+                _anchor_handler_to(response, self)
             return response
         except httpx.TimeoutException:
             raise litellm.Timeout(
@@ -1157,6 +1188,8 @@ class HTTPHandler:
                     "DELETE", url, data=request_data, json=json, params=params, headers=headers, content=request_content  # type: ignore
                 )
             response = self.client.send(req, stream=stream)
+            if stream:
+                _anchor_handler_to(response, self)
             response.raise_for_status()
             return response
         except httpx.TimeoutException:
