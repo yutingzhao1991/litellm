@@ -438,6 +438,23 @@ async def check_api_key_for_custom_headers_or_pass_through_endpoints(
     return api_key
 
 
+def _resolve_model_for_budget_checks(
+    request_data: dict, route: str
+) -> Optional[str]:
+    """
+    Resolve the model used by the per-model budget checks.
+
+    Must match the model resolution used for key permissions: pass-through routes
+    (`/feelfish/{model}`) carry the gateway model in the path while the request
+    body belongs to the upstream protocol and may hold an unrelated `model`.
+    """
+    resolved = get_model_from_request(request_data, route)
+    if isinstance(resolved, str):
+        return resolved
+    # Comma separated model lists keep their historical behaviour.
+    return request_data.get("model", None)
+
+
 async def _user_api_key_auth_builder(  # noqa: PLR0915
     request: Request,
     api_key: str,
@@ -1228,7 +1245,7 @@ async def _user_api_key_auth_builder(  # noqa: PLR0915
 
                 # Check 5. Token Model Spend is under Model budget
                 max_budget_per_model = valid_token.model_max_budget
-                current_model = request_data.get("model", None)
+                current_model = _resolve_model_for_budget_checks(request_data, route)
 
                 if (
                     max_budget_per_model is not None
@@ -1662,7 +1679,7 @@ async def _run_post_custom_auth_checks(
                 else "",
             )
 
-    current_model = request_data.get("model", None)
+    current_model = _resolve_model_for_budget_checks(request_data, route)
 
     # 3. Check key-level model_max_budget
     max_budget_per_model = valid_token.model_max_budget

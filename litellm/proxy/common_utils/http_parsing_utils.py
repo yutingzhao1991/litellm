@@ -39,8 +39,18 @@ async def _read_request_body(request: Optional[Request]) -> Dict:
 
         if "form" in content_type:
             parsed_body = dict(await request.form())
-            if "metadata" in parsed_body and isinstance(parsed_body["metadata"], str):
+            if _is_feelfish_route(request):
+                _drop_upstream_metadata_fields(parsed_body)
+            elif "metadata" in parsed_body and isinstance(
+                parsed_body["metadata"], str
+            ):
                 parsed_body["metadata"] = json.loads(parsed_body["metadata"])
+        elif not _should_parse_body_as_json(content_type, request):
+            # Non-JSON payloads (binary/plain bodies forwarded by pass-through
+            # routes) must not be forced through the JSON parser: doing so
+            # rejects valid requests with a 400 before they reach their handler.
+            # The body itself is left unread for the route to forward verbatim.
+            parsed_body = {}
         else:
             # Read the request body
             body = await request.body()
@@ -78,6 +88,9 @@ async def _read_request_body(request: Optional[Request]) -> Dict:
                             code=status.HTTP_400_BAD_REQUEST,
                         )
 
+        if _is_feelfish_route(request):
+            _drop_upstream_metadata_fields(parsed_body)
+
         # Cache the parsed result
         _safe_set_request_parsed_body(request=request, parsed_body=parsed_body)
         return parsed_body
@@ -92,6 +105,46 @@ async def _read_request_body(request: Optional[Request]) -> Dict:
             "Unexpected error reading request body - {}".format(e)
         )
         return {}
+
+
+FEELFISH_RAW_BODY_ROUTE = "/feelfish"
+
+
+def _drop_upstream_metadata_fields(parsed_body: dict) -> None:
+    """
+    Keep pass-through bodies out of the auth chain's metadata handling.
+
+    A form/JSON body may legitimately contain a plain string `metadata` field for
+    the upstream; the auth chain would treat it as LiteLLM metadata and crash on
+    `metadata.get("guardrails")`. The body is *not* consumed from the request, so
+    the route can still forward it verbatim.
+    """
+    for key in ("metadata", "litellm_metadata"):
+        parsed_body.pop(key, None)
+
+
+def _is_feelfish_route(request: Optional[Request]) -> bool:
+    route = getattr(getattr(request, "url", None), "path", "")
+    return isinstance(route, str) and FEELFISH_RAW_BODY_ROUTE in route
+
+
+def _should_parse_body_as_json(content_type: object, request: Optional[Request]) -> bool:
+    """
+    Whether the request body should be parsed as JSON.
+
+    Only the FeelFish pass-through route family is exempted from JSON parsing, and
+    only for non-JSON content types: its request body is the upstream's protocol
+    payload and may be arbitrary bytes. Everywhere else the historical behaviour
+    is kept, because the auth chain derives the called model from the parsed body
+    — skipping the parse would let a key with model restrictions bypass them.
+    """
+    if not _is_feelfish_route(request):
+        return True
+    # On pass-through routes the called model comes from the path, so the body
+    # never needs parsing for auth: an untyped raw body must stay forwardable.
+    if not isinstance(content_type, str) or not content_type:
+        return False
+    return "json" in content_type.lower()
 
 
 def _safe_get_request_parsed_body(request: Optional[Request]) -> Optional[dict]:

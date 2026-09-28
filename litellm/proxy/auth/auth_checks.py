@@ -106,6 +106,91 @@ def _log_budget_lookup_failure(entity: str, error: Exception) -> None:
     )
 
 
+# Pricing fields that are not token based. A deployment using any of them is
+# NOT free even when input/output token costs are 0 (which is the normal shape
+# for pricing defined per character / second / image / response field).
+NON_TOKEN_PRICING_KEYS = (
+    "response_field_pricing",
+    "input_cost_per_character",
+    "output_cost_per_character",
+    "input_cost_per_character_above_128k_tokens",
+    "output_cost_per_character_above_128k_tokens",
+    "input_cost_per_image",
+    "input_cost_per_image_above_128k_tokens",
+    "output_cost_per_image",
+    "output_cost_per_image_token",
+    "input_cost_per_pixel",
+    "output_cost_per_pixel",
+    "input_cost_per_second",
+    "output_cost_per_second",
+    "input_cost_per_audio_per_second",
+    "output_cost_per_audio_per_second",
+    "input_cost_per_audio_token",
+    "output_cost_per_audio_token",
+    "input_cost_per_video_per_second",
+    "output_cost_per_video_per_second",
+    "input_cost_per_query",
+    "search_context_cost_per_query",
+    "citation_cost_per_token",
+    "ocr_cost_per_page",
+    "annotation_cost_per_page",
+    "tiered_pricing",
+)
+
+
+def _is_configured_price(value: Any) -> bool:
+    """True when a pricing field carries an actual (non-empty, non-zero) price."""
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, (list, dict, tuple, set)):
+        return len(value) > 0
+    if isinstance(value, str):
+        try:
+            return float(value.strip()) > 0
+        except ValueError:
+            return bool(value.strip())
+    return False
+
+
+def _deployment_merged_model_info(
+    deployment: Dict[str, Any], llm_router: Router
+) -> Dict[str, Any]:
+    """Deployment model info merged with the model cost map entry (deployment wins)."""
+    model_info = dict(deployment.get("model_info") or {})
+    litellm_params: Dict[str, Any] = deployment.get("litellm_params") or {}
+    model_id = model_info.get("id")
+    model_name = litellm_params.get("model")
+    if model_id and model_name:
+        try:
+            merged = llm_router.get_deployment_model_info(
+                model_id=model_id, model_name=model_name
+            )
+        except Exception:
+            merged = None
+        if merged:
+            return {
+                **merged,
+                **{key: value for key, value in model_info.items() if value is not None},
+            }
+    return {**litellm_params, **model_info}
+
+
+def _model_group_has_non_token_pricing(model_name: str, llm_router: Router) -> bool:
+    """True when any deployment of ``model_name`` is priced by something other than tokens."""
+    try:
+        deployments = llm_router.get_model_list(model_name=model_name) or []
+    except Exception:
+        return False
+
+    for deployment in deployments:
+        merged = _deployment_merged_model_info(deployment, llm_router)
+        if any(_is_configured_price(merged.get(key)) for key in NON_TOKEN_PRICING_KEYS):
+            return True
+    return False
+
+
 def _is_model_cost_zero(
     model: Optional[Union[str, List[str]]], llm_router: Optional[Router]
 ) -> bool:
@@ -129,6 +214,19 @@ def _is_model_cost_zero(
 
     for model_name in model_list:
         try:
+            # A model priced by something other than tokens (response fields,
+            # characters, seconds, images, ...) is NOT free: skipping budget checks
+            # would let an over-budget key reach a billable upstream. The token
+            # costs for such deployments are legitimately 0/0, so the token check
+            # below cannot detect them.
+            if _model_group_has_non_token_pricing(
+                model_name=model_name, llm_router=llm_router
+            ):
+                verbose_proxy_logger.debug(
+                    f"Model {model_name} has non-token pricing configured, assuming it has cost"
+                )
+                return False
+
             # Use router's get_model_group_info method directly for better reliability
             model_group_info = llm_router.get_model_group_info(model_group=model_name)
 

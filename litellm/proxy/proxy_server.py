@@ -448,6 +448,11 @@ from litellm.proxy.pass_through_endpoints.llm_passthrough_endpoints import (
 from litellm.proxy.pass_through_endpoints.pass_through_endpoints import (
     initialize_pass_through_endpoints,
 )
+from litellm.proxy.feelfish_passthrough import (
+    register_feelfish_routes,
+    router as feelfish_passthrough_router,
+    validate_feelfish_deployments,
+)
 from litellm.proxy.pass_through_endpoints.pass_through_endpoints import (
     router as pass_through_router,
 )
@@ -3222,6 +3227,10 @@ class ProxyConfig:
             ),
             ignore_invalid_deployments=True,  # don't raise an error if a deployment is invalid
         )  # type:ignore
+
+        # FeelFish pass-through deployments must be valid before the proxy serves
+        # traffic: a misconfigured one would silently bill 0 instead of failing.
+        validate_feelfish_deployments(router.get_model_list())
 
         if redis_usage_cache is not None and router.cache.redis_cache is None:
             router._update_redis_cache(cache=redis_usage_cache)
@@ -13001,6 +13010,8 @@ app.include_router(vector_store_management_router)
 app.include_router(vector_store_files_router)
 app.include_router(credential_router)
 app.include_router(llm_passthrough_router)
+register_feelfish_routes()
+app.include_router(feelfish_passthrough_router)
 app.include_router(mcp_management_router)
 app.include_router(anthropic_router)
 app.include_router(anthropic_skills_router)

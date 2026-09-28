@@ -239,6 +239,9 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     time_based_pricing: Optional[
         TimeBasedPricing
     ]  # Time-window based pricing multiplier
+    response_field_pricing: Optional[
+        Dict[str, Any]
+    ]  # FeelFish pass-through provider: pricing rules evaluated against response fields
     litellm_provider: Required[str]
     mode: Required[
         Literal[
@@ -2923,6 +2926,7 @@ class CustomPricingLiteLLMParams(BaseModel):
     citation_cost_per_token: Optional[float] = None
     tiered_pricing: Optional[List[Dict[str, Any]]] = None
     time_based_pricing: Optional[Dict[str, Any]] = None
+    response_field_pricing: Optional[Dict[str, Any]] = None
 
 
 all_litellm_params = (
@@ -3124,6 +3128,7 @@ class LlmProviders(str, Enum):
     CEREBRAS = "cerebras"
     AI21_CHAT = "ai21_chat"
     VOLCENGINE = "volcengine"
+    FEELFISH = "feelfish"
     CODESTRAL = "codestral"
     TEXT_COMPLETION_CODESTRAL = "text-completion-codestral"
     DASHSCOPE = "dashscope"

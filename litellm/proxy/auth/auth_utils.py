@@ -753,6 +753,14 @@ def get_end_user_id_from_request_body(
 def get_model_from_request(
     request_data: dict, route: str
 ) -> Optional[Union[str, List[str]]]:
+    # FeelFish pass-through routes carry the gateway model in the path
+    # (/feelfish/{model_name}[/...]). The path is authoritative: the request body
+    # belongs to the upstream protocol and may legitimately contain its own
+    # `model` field, so it must never decide which model is authorized/billed.
+    feelfish_match = re.match(r"^/feelfish/([^/]+)", route)
+    if feelfish_match:
+        return feelfish_match.group(1)
+
     # First try to get model from request_data
     model = request_data.get("model") or request_data.get("target_model_names")
 
