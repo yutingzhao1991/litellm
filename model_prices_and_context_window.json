@@ -9228,6 +9228,59 @@
         "supports_system_messages": true,
         "supports_tool_choice": false
     },
+    "deepseek-flash": {
+        "cache_read_input_token_cost": 2.9e-09,
+        "input_cost_per_token": 1.5e-07,
+        "litellm_provider": "deepseek",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 65536,
+        "max_tokens": 65536,
+        "mode": "chat",
+        "output_cost_per_token": 5.8e-07,
+        "source": "https://api-docs.deepseek.com/quick_start/pricing",
+        "supported_endpoints": [
+            "/v1/chat/completions"
+        ],
+        "supports_function_calling": true,
+        "supports_native_streaming": true,
+        "supports_parallel_function_calling": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_system_messages": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "time_based_pricing": {
+            "calendar": {
+                "holidays": [
+                    "2026-09-25..2026-09-27",
+                    "2026-10-01..2026-10-07"
+                ]
+            },
+            "rules": [
+                {
+                    "dates": [
+                        "workday"
+                    ],
+                    "end_time": "12:00",
+                    "multiplier": 1.6,
+                    "name": "deepseek_peak_morning",
+                    "start_time": "09:00"
+                },
+                {
+                    "dates": [
+                        "workday"
+                    ],
+                    "end_time": "18:00",
+                    "multiplier": 1.6,
+                    "name": "deepseek_peak_afternoon",
+                    "start_time": "14:00"
+                }
+            ],
+            "timezone": "Asia/Shanghai"
+        }
+    },
+
     "dashscope/qwen-coder": {
         "input_cost_per_token": 3e-07,
         "litellm_provider": "dashscope",
