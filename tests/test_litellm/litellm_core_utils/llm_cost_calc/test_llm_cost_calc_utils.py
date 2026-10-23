@@ -34,10 +34,12 @@ sys.path.insert(
 
 from litellm.litellm_core_utils.llm_cost_calc.utils import (
     _calculate_input_cost,
+    _get_token_base_cost,
     PromptTokensDetailsResult,
     calculate_cache_writing_cost,
     generic_cost_per_token,
 )
+from litellm.types.router import ModelInfo as ProxyModelInfo
 from litellm.types.utils import CacheCreationTokenDetails, Usage
 
 
@@ -217,6 +219,40 @@ def test_image_tokens_fallback_to_base_cost():
 
     assert round(prompt_cost, 12) == round(expected_prompt_cost, 12)
     assert round(completion_cost, 12) == round(expected_completion_cost, 12)
+
+
+def test_get_token_base_cost_reads_threshold_keys_from_proxy_model_info():
+    """DB/config models pass a pydantic ModelInfo, whose iteration yields tuples.
+
+    Regression: iterating it with ``for k in model_info`` raised AttributeError and
+    silently billed long-context requests at the base rate.
+    """
+    model_info = ProxyModelInfo(
+        input_cost_per_token=2e-6,
+        output_cost_per_token=10e-6,
+        cache_read_input_token_cost=1e-7,
+        input_cost_per_token_above_272k_tokens=4e-6,
+        output_cost_per_token_above_272k_tokens=15e-6,
+        cache_read_input_token_cost_above_272k_tokens=2e-7,
+    )
+
+    below = Usage(prompt_tokens=272_000, completion_tokens=5, total_tokens=272_005)
+    assert _get_token_base_cost(model_info, below) == (
+        2e-6,
+        10e-6,
+        0.0,
+        0.0,
+        1e-7,
+    )
+
+    above = Usage(prompt_tokens=272_001, completion_tokens=5, total_tokens=272_006)
+    assert _get_token_base_cost(model_info, above) == (
+        4e-6,
+        15e-6,
+        0.0,
+        0.0,
+        2e-7,
+    )
 
 
 def test_generic_cost_per_token_above_200k_tokens():

@@ -205,9 +205,18 @@ def _get_token_base_cost(
     # Exclude service_tier-specific variants (e.g. input_cost_per_token_above_200k_tokens_priority)
     # so that the threshold detection loop only processes standard keys.  The
     # service_tier-specific above-threshold key is resolved later via _get_service_tier_cost_key.
+    #
+    # `model_info` is usually a pydantic `ModelInfo` (DB/config models). Iterating it
+    # yields `(key, value)` tuples rather than keys, which made every threshold lookup
+    # raise `AttributeError` and silently fall back to base pricing. Use a plain mapping.
+    model_info_keys = (
+        model_info.model_dump(exclude_none=True)
+        if hasattr(model_info, "model_dump")
+        else model_info
+    )
     threshold_keys = [
         k
-        for k in model_info
+        for k in model_info_keys
         if k.startswith("input_cost_per_token_above_")
         and not any(k.endswith(f"_{st.value}") for st in ServiceTier)
     ]
