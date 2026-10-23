@@ -255,6 +255,32 @@ def test_get_token_base_cost_reads_threshold_keys_from_proxy_model_info():
     )
 
 
+def test_get_model_info_preserves_above_272k_tokens(monkeypatch):
+    """ModelInfoBase must carry the 272k tier keys through get_model_info.
+
+    Regression: get_model_info rebuilt a TypedDict with an explicit field list and
+    dropped unknown threshold keys, so the cost calculator never saw them.
+    """
+    monkeypatch.setitem(
+        litellm.model_cost,
+        "test-272k",
+        {
+            "input_cost_per_token": 2e-6,
+            "output_cost_per_token": 10e-6,
+            "cache_read_input_token_cost": 1e-7,
+            "input_cost_per_token_above_272k_tokens": 4e-6,
+            "output_cost_per_token_above_272k_tokens": 15e-6,
+            "cache_read_input_token_cost_above_272k_tokens": 2e-7,
+            "litellm_provider": "openai",
+            "mode": "chat",
+        },
+    )
+    info = litellm.get_model_info("test-272k", "openai")
+    assert info["input_cost_per_token_above_272k_tokens"] == 4e-6
+    assert info["output_cost_per_token_above_272k_tokens"] == 15e-6
+    assert info["cache_read_input_token_cost_above_272k_tokens"] == 2e-7
+
+
 def test_generic_cost_per_token_above_200k_tokens():
     model = "gemini-2.5-pro-exp-03-25"
     custom_llm_provider = "vertex_ai"
