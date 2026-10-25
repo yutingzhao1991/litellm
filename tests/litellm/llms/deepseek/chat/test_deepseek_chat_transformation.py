@@ -166,3 +166,78 @@ class TestDeepSeekThinkingParams:
         )
 
         assert "thinking" not in result
+
+
+class TestDeepSeekVisionMessages:
+    """Image parts must survive message transformation for DeepSeek vision models."""
+
+    def setup_method(self):
+        self.config = DeepSeekChatConfig()
+
+    def test_transform_messages_preserves_image_parts(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what text is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,iVBORw0KGgo=",
+                            "detail": "high",
+                        },
+                    },
+                ],
+            }
+        ]
+
+        result = self.config._transform_messages(
+            messages=messages, model="deepseek-flash"
+        )
+
+        assert isinstance(result, list)
+        content = result[0]["content"]
+        assert isinstance(content, list)
+        assert content[0] == {"type": "text", "text": "what text is in this image?"}
+        assert content[1]["type"] == "image_url"
+        assert content[1]["image_url"]["url"] == "data:image/png;base64,iVBORw0KGgo="
+
+    def test_transform_messages_flattens_text_only_lists(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hello"},
+                    {"type": "text", "text": " world"},
+                ],
+            }
+        ]
+
+        result = self.config._transform_messages(
+            messages=messages, model="deepseek-flash"
+        )
+
+        assert isinstance(result, list)
+        assert result[0]["content"] == "hello world"
+
+    def test_transform_messages_keeps_image_only_lists(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                    }
+                ],
+            }
+        ]
+
+        result = self.config._transform_messages(
+            messages=messages, model="deepseek-flash"
+        )
+
+        assert isinstance(result, list)
+        content = result[0]["content"]
+        assert isinstance(content, list)
+        assert content[0]["type"] == "image_url"

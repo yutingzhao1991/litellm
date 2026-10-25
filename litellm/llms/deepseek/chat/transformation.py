@@ -5,12 +5,39 @@ Translates from OpenAI's `/v1/chat/completions` to DeepSeek's `/v1/chat/completi
 from typing import Any, Coroutine, List, Literal, Optional, Tuple, Union, overload
 
 from litellm.litellm_core_utils.prompt_templates.common_utils import (
-    handle_messages_with_content_list_to_str_conversion,
+    convert_content_list_to_str,
 )
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import AllMessageValues
 
 from ...openai.chat.gpt_transformation import OpenAIGPTConfig
+
+
+# Content part types that carry image bytes. Flattening a content list is only safe
+# for text-only messages; DeepSeek's vision models accept the OpenAI multi-part shape.
+_IMAGE_CONTENT_PART_TYPES = frozenset({"image_url", "input_image", "image"})
+
+
+def _has_image_content(message: AllMessageValues) -> bool:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(part, dict) and part.get("type") in _IMAGE_CONTENT_PART_TYPES
+        for part in content
+    )
+
+
+def _flatten_text_only_message_content(
+    messages: List[AllMessageValues],
+) -> List[AllMessageValues]:
+    for message in messages:
+        if _has_image_content(message):
+            continue
+        texts = convert_content_list_to_str(message=message)
+        if texts:
+            message["content"] = texts
+    return messages
 
 
 class DeepSeekChatConfig(OpenAIGPTConfig):
@@ -81,9 +108,14 @@ class DeepSeekChatConfig(OpenAIGPTConfig):
         self, messages: List[AllMessageValues], model: str, is_async: bool = False
     ) -> Union[List[AllMessageValues], Coroutine[Any, Any, List[AllMessageValues]]]:
         """
-        DeepSeek does not support content in list format.
+        Flatten text-only content lists, but keep image parts.
+
+        DeepSeek's chat API accepts OpenAI-style multi-part content for its vision
+        models. The old blanket flattening silently dropped every image part, so a
+        request with an attached image reached the model as text-only and the model
+        answered "no image was provided" while the caller was still billed.
         """
-        messages = handle_messages_with_content_list_to_str_conversion(messages)
+        messages = _flatten_text_only_message_content(messages)
         if is_async:
             return super()._transform_messages(
                 messages=messages, model=model, is_async=True
