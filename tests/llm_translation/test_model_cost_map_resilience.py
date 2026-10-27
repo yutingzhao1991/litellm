@@ -24,6 +24,7 @@ import litellm
 from litellm.litellm_core_utils.get_model_cost_map import (
     GetModelCostMap,
     get_model_cost_map,
+    get_model_cost_map_source_info,
 )
 
 
@@ -289,3 +290,118 @@ class TestBadHostedModelCostMap:
             assert response.choices[0].message.content == "hello from mock"
         finally:
             litellm.model_cost = original
+
+
+class TestLastKnownGoodCache:
+    """Tests for the last known good cache used when the remote fetch fails.
+
+    The bundled backup only knows the models that existed at image build time,
+    so falling back to it silently prices newer models at 0.
+    """
+
+    URL = "https://fake-url.com/model_prices.json"
+
+    @staticmethod
+    def _mock_success(payload):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = payload
+        return response
+
+    def test_should_write_cache_on_successful_fetch(self, tmp_path, monkeypatch):
+        """A successful fetch is persisted so it can be reused later."""
+        cache_path = tmp_path / "cache.json"
+        monkeypatch.setenv("LITELLM_MODEL_COST_MAP_CACHE_PATH", str(cache_path))
+        remote_map = {f"model-{i}": {"input_cost_per_token": 1e-6} for i in range(100)}
+
+        with patch("httpx.get", return_value=self._mock_success(remote_map)):
+            result = get_model_cost_map(self.URL)
+
+        assert result == remote_map
+        assert cache_path.exists()
+        assert get_model_cost_map_source_info()["source"] == "remote"
+
+    def test_should_prefer_cache_over_backup_when_remote_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """Fetch failure uses the cached map, not the bundled backup."""
+        cache_path = tmp_path / "cache.json"
+        monkeypatch.setenv("LITELLM_MODEL_COST_MAP_CACHE_PATH", str(cache_path))
+        remote_map = {
+            f"custom-model-{i}": {"input_cost_per_token": 1e-6} for i in range(100)
+        }
+
+        with patch("httpx.get", return_value=self._mock_success(remote_map)):
+            get_model_cost_map(self.URL)
+
+        with patch("httpx.get", side_effect=Exception("Connection refused")):
+            result = get_model_cost_map(self.URL)
+
+        assert result == remote_map
+        assert "custom-model-0" in result
+        source_info = get_model_cost_map_source_info()
+        assert source_info["source"] == "cache"
+        assert "Connection refused" in source_info["fallback_reason"]
+
+    def test_should_prefer_cache_when_remote_map_fails_integrity_check(
+        self, tmp_path, monkeypatch
+    ):
+        """A corrupt/empty remote map must not poison pricing."""
+        cache_path = tmp_path / "cache.json"
+        monkeypatch.setenv("LITELLM_MODEL_COST_MAP_CACHE_PATH", str(cache_path))
+        remote_map = {
+            f"custom-model-{i}": {"input_cost_per_token": 1e-6} for i in range(100)
+        }
+
+        with patch("httpx.get", return_value=self._mock_success(remote_map)):
+            get_model_cost_map(self.URL)
+
+        with patch("httpx.get", return_value=self._mock_success({})):
+            result = get_model_cost_map(self.URL)
+
+        assert result == remote_map
+        assert get_model_cost_map_source_info()["source"] == "cache"
+
+    def test_should_fall_back_to_bundled_backup_without_cache(
+        self, tmp_path, monkeypatch
+    ):
+        """With no cache at all the old behavior is preserved."""
+        monkeypatch.setenv(
+            "LITELLM_MODEL_COST_MAP_CACHE_PATH", str(tmp_path / "missing.json")
+        )
+
+        with patch("httpx.get", side_effect=Exception("Connection refused")):
+            result = get_model_cost_map(self.URL)
+
+        assert len(result) > len(
+            {f"model-{i}": {} for i in range(100)}
+        )
+        source_info = get_model_cost_map_source_info()
+        assert source_info["source"] == "local"
+        assert "Connection refused" in source_info["fallback_reason"]
+
+    def test_should_reject_corrupt_cache_file(self, tmp_path, monkeypatch):
+        """A corrupt cache file must not crash the fallback path."""
+        cache_path = tmp_path / "cache.json"
+        cache_path.write_text("{not json", encoding="utf-8")
+        monkeypatch.setenv("LITELLM_MODEL_COST_MAP_CACHE_PATH", str(cache_path))
+
+        with patch("httpx.get", side_effect=Exception("Connection refused")):
+            result = get_model_cost_map(self.URL)
+
+        assert len(result) > 100
+        assert get_model_cost_map_source_info()["source"] == "local"
+
+    def test_should_use_cache_dir_with_url_specific_filename(
+        self, tmp_path, monkeypatch
+    ):
+        """The cache dir override keeps one file per URL."""
+        monkeypatch.delenv("LITELLM_MODEL_COST_MAP_CACHE_PATH", raising=False)
+        monkeypatch.setenv("LITELLM_MODEL_COST_MAP_CACHE_DIR", str(tmp_path))
+        remote_map = {f"model-{i}": {"input_cost_per_token": 1e-6} for i in range(100)}
+
+        with patch("httpx.get", return_value=self._mock_success(remote_map)):
+            get_model_cost_map(self.URL)
+
+        cached_files = list(tmp_path.glob("litellm_model_cost_map_last_good_*.json"))
+        assert len(cached_files) == 1
