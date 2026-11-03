@@ -51,25 +51,33 @@ async def batch_upsert_tools(
     """
     if not items:
         return
-    try:
-        data = [item for item in items if item.get("tool_name")]
-        if not data:
-            return
-        for item in data:
-            tool_name = item.get("tool_name", "")
-            origin = item.get("origin") or "user_defined"
-            created_by = item.get("created_by") or "system"
-            key_hash = item.get("key_hash")
-            team_id = item.get("team_id")
-            key_alias = item.get("key_alias")
-            now = datetime.now(timezone.utc).isoformat()
+    data = [item for item in items if item.get("tool_name")]
+    if not data:
+        return
+
+    # `created_at` / `updated_at` are `timestamp without time zone`. Prisma's raw
+    # execute sends Python str params as text, so the columns must be cast
+    # explicitly — otherwise every upsert fails with
+    # `column "created_at" is of type timestamp without time zone but expression is of type text`.
+    # `AT TIME ZONE 'UTC'` pins the stored value to UTC regardless of the session timezone.
+    now = datetime.now(timezone.utc).isoformat()
+    failed: List[str] = []
+    last_error: Optional[Exception] = None
+    for item in data:
+        tool_name = item.get("tool_name", "")
+        origin = item.get("origin") or "user_defined"
+        created_by = item.get("created_by") or "system"
+        key_hash = item.get("key_hash")
+        team_id = item.get("team_id")
+        key_alias = item.get("key_alias")
+        try:
             await prisma_client.db.execute_raw(
                 'INSERT INTO "LiteLLM_ToolTable" '
                 "(tool_id, tool_name, origin, call_policy, call_count, created_by, updated_by, key_hash, team_id, key_alias, created_at, updated_at) "
-                "VALUES ($7, $1, $2, 'untrusted', 1, $3, $3, $4, $5, $6, $8, $8) "
+                "VALUES ($7, $1, $2, 'untrusted', 1, $3, $3, $4, $5, $6, ($8::timestamptz AT TIME ZONE 'UTC'), ($8::timestamptz AT TIME ZONE 'UTC')) "
                 "ON CONFLICT (tool_name) DO UPDATE SET "
                 "call_count = \"LiteLLM_ToolTable\".call_count + 1, "
-                "updated_at = $8",
+                "updated_at = ($8::timestamptz AT TIME ZONE 'UTC')",
                 tool_name,
                 origin,
                 created_by,
@@ -79,11 +87,23 @@ async def batch_upsert_tools(
                 str(uuid.uuid4()),
                 now,
             )
+        except Exception as e:
+            # One bad row must not drop the rest of the batch; aggregate the
+            # failures into a single log line so a broken DB can't flood logs.
+            failed.append(tool_name)
+            last_error = e
+    if failed:
+        verbose_proxy_logger.error(
+            "tool_registry_writer: %d/%d tool upsert(s) failed (first: %s, last error: %s)",
+            len(failed),
+            len(data),
+            failed[0],
+            last_error,
+        )
+    else:
         verbose_proxy_logger.debug(
             "tool_registry_writer: upserted %d tool(s)", len(data)
         )
-    except Exception as e:
-        verbose_proxy_logger.error("tool_registry_writer batch_upsert_tools error: %s", e)
 
 
 async def list_tools(
@@ -143,8 +163,9 @@ async def update_tool_policy(
         now = datetime.now(timezone.utc).isoformat()
         await prisma_client.db.execute_raw(
             'INSERT INTO "LiteLLM_ToolTable" (tool_id, tool_name, call_policy, created_by, updated_by, created_at, updated_at) '
-            "VALUES ($4, $1, $2, $3, $3, $5, $5) "
-            "ON CONFLICT (tool_name) DO UPDATE SET call_policy = $2, updated_by = $3, updated_at = $5",
+            "VALUES ($4, $1, $2, $3, $3, ($5::timestamptz AT TIME ZONE 'UTC'), ($5::timestamptz AT TIME ZONE 'UTC')) "
+            "ON CONFLICT (tool_name) DO UPDATE SET call_policy = $2, updated_by = $3, "
+            "updated_at = ($5::timestamptz AT TIME ZONE 'UTC')",
             tool_name,
             call_policy,
             _updated_by,

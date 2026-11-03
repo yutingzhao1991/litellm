@@ -56,6 +56,21 @@ async def test_batch_upsert_tools_calls_execute_raw():
     sql = call_args.args[0]
     assert "LiteLLM_ToolTable" in sql
     assert "ON CONFLICT" in sql
+    # created_at/updated_at are `timestamp without time zone`; the param must be
+    # cast explicitly or Postgres rejects the text expression.
+    assert "::timestamptz AT TIME ZONE 'UTC'" in sql
+
+
+@pytest.mark.asyncio
+async def test_batch_upsert_continues_after_one_tool_fails():
+    prisma = _make_prisma()
+    prisma.db.execute_raw = AsyncMock(side_effect=[RuntimeError("boom"), None])
+    items = [
+        {"tool_name": "tool_a", "origin": "mcp_server", "created_by": None},
+        {"tool_name": "tool_b", "origin": "user_defined", "created_by": "alice"},
+    ]
+    await batch_upsert_tools(prisma, items)
+    assert prisma.db.execute_raw.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -176,6 +191,7 @@ async def test_update_tool_policy_calls_execute_raw():
     sql = call_args.args[0]
     assert "ON CONFLICT" in sql
     assert "call_policy" in sql
+    assert "::timestamptz AT TIME ZONE 'UTC'" in sql
 
 
 @pytest.mark.asyncio
