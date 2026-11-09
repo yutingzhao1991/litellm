@@ -158,11 +158,15 @@ async def test_recreate_prisma_client_kills_engine_that_survives_failed_disconne
     with _use_fake_prisma_module(new_client), patch(
         "litellm.proxy.db.prisma_client.kill_process",
         side_effect=lambda pid, *a, **k: events.append(("kill", pid)) or True,
-    ), patch("litellm.proxy.db.prisma_client.pid_is_alive", return_value=True):
+    ), patch("litellm.proxy.db.prisma_client.pid_is_alive", return_value=True), patch(
+        "litellm.proxy.db.prisma_client.reap_child",
+        side_effect=lambda pid, *a, **k: events.append(("reap", pid)) or True,
+    ):
         await wrapper.recreate_prisma_client("postgresql://user:pass@host:5432/db")
 
     kills = [entry for entry in events if entry[0] == "kill"]
     assert kills == [("kill", 4322), ("kill", 4322)]
+    assert ("reap", 4322) in events, "a killed engine must not be left as a zombie"
     assert wrapper._original_prisma is new_client
     assert new_client.connected is True
 

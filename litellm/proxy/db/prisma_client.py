@@ -17,6 +17,7 @@ from litellm.proxy.db.prisma_engine_lifecycle import (
     engine_pid_of,
     kill_process,
     pid_is_alive,
+    reap_child,
 )
 from litellm.secret_managers.main import str_to_bool
 
@@ -219,6 +220,8 @@ class PrismaWrapper:
                 "prisma-query-engine PID %s survived disconnect; killed it",
                 old_engine_pid,
             )
+            # disconnect() raised before its own waitpid: do not leave a zombie
+            reap_child(old_engine_pid)
 
         if http_client is not None:
             self._original_prisma = Prisma(http=http_client)

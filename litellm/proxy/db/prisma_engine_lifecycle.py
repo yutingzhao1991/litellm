@@ -35,6 +35,7 @@ Two guards live here:
 import asyncio
 import os
 import signal
+import time
 from typing import Callable, Iterable, List, Optional
 
 from litellm._logging import verbose_proxy_logger
@@ -89,6 +90,30 @@ def kill_process(pid: int, sig: int = signal.SIGKILL) -> bool:
         verbose_proxy_logger.debug("Failed to signal PID %s: %s", pid, e)
         return False
     return True
+
+
+def reap_child(pid: int, timeout: float = 1.0) -> bool:
+    """Best-effort ``waitpid`` for a child we just killed.
+
+    ``Prisma.disconnect()`` normally reaps the engine through ``Popen.wait()``; when
+    it raises before that point the killed engine is left as a zombie.  Reaping it
+    here keeps PID usage flat across reconnects.  Returns True when it was reaped.
+    """
+    if pid <= 0:
+        return False
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return False  # not our child (already reaped, or reparented)
+        except OSError:
+            return False
+        if waited == pid:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
 
 
 def _read_cmdline(pid: int, proc_root: str = PROC_ROOT) -> str:

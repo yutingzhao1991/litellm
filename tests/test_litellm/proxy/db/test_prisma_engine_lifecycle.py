@@ -15,6 +15,7 @@ from litellm.proxy.db.prisma_engine_lifecycle import (
     list_query_engine_pids,
     pid_is_alive,
     read_ppid,
+    reap_child,
     reap_orphan_query_engines,
 )
 
@@ -148,3 +149,16 @@ async def test_reaper_survives_broken_exclude_callback(tmp_path):
 
     assert await reaper.run_once_async() == [100]
     assert signalled == [100]
+
+
+def test_reap_child_reaps_exited_child():
+    import subprocess
+
+    proc = subprocess.Popen(["true"])
+    assert reap_child(proc.pid, timeout=2.0) is True
+    proc.poll()
+
+
+def test_reap_child_returns_false_for_non_child():
+    assert reap_child(os.getpid(), timeout=0.1) is False
+    assert reap_child(0) is False
