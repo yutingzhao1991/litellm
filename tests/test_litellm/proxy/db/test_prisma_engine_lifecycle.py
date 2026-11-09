@@ -13,6 +13,7 @@ from litellm.proxy.db.prisma_engine_lifecycle import (
     find_orphan_query_engine_pids,
     kill_process,
     list_query_engine_pids,
+    is_query_engine_pid,
     pid_is_alive,
     read_ppid,
     reap_child,
@@ -162,3 +163,13 @@ def test_reap_child_reaps_exited_child():
 def test_reap_child_returns_false_for_non_child():
     assert reap_child(os.getpid(), timeout=0.1) is False
     assert reap_child(0) is False
+
+
+def test_is_query_engine_pid(tmp_path):
+    _write_process(tmp_path, 100, ENGINE_CMD, ppid=1)
+    _write_process(tmp_path, 200, "/usr/bin/python3.13 /usr/sbin/litellm --port 4000", ppid=1)
+
+    assert is_query_engine_pid(100, str(tmp_path)) is True
+    assert is_query_engine_pid(200, str(tmp_path)) is False
+    assert is_query_engine_pid(999, str(tmp_path)) is False
+    assert is_query_engine_pid(0, str(tmp_path)) is False

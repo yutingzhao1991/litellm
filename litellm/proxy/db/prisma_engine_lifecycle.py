@@ -147,6 +147,18 @@ def read_ppid(pid: int, proc_root: str = PROC_ROOT) -> int:
         return -1
 
 
+def is_query_engine_pid(pid: int, proc_root: str = PROC_ROOT) -> bool:
+    """True when ``pid`` currently looks like a Prisma query engine.
+
+    Guards the reconnect path: ``Prisma._engine.process.pid`` can already be stale
+    (the engine exited and was reaped by the watcher thread), and a recycled PID
+    would otherwise make us SIGKILL an unrelated process.
+    """
+    if pid <= 0:
+        return False
+    return QUERY_ENGINE_CMDLINE_MARKER in _read_cmdline(pid, proc_root)
+
+
 def list_query_engine_pids(proc_root: str = PROC_ROOT) -> List[int]:
     """PIDs of every process whose command line looks like a Prisma query engine."""
     found: List[int] = []

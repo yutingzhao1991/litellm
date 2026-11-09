@@ -133,6 +133,8 @@ async def test_recreate_prisma_client_kills_old_engine_before_disconnect():
     wrapper = PrismaWrapper(original_prisma=old_client, iam_token_db_auth=False)
 
     with _use_fake_prisma_module(new_client), patch(
+        "litellm.proxy.db.prisma_client.is_query_engine_pid", return_value=True
+    ), patch(
         "litellm.proxy.db.prisma_client.kill_process",
         side_effect=lambda pid, *a, **k: events.append(("kill", pid)) or True,
     ), patch("litellm.proxy.db.prisma_client.pid_is_alive", return_value=False):
@@ -156,6 +158,8 @@ async def test_recreate_prisma_client_kills_engine_that_survives_failed_disconne
     wrapper = PrismaWrapper(original_prisma=old_client, iam_token_db_auth=False)
 
     with _use_fake_prisma_module(new_client), patch(
+        "litellm.proxy.db.prisma_client.is_query_engine_pid", return_value=True
+    ), patch(
         "litellm.proxy.db.prisma_client.kill_process",
         side_effect=lambda pid, *a, **k: events.append(("kill", pid)) or True,
     ), patch("litellm.proxy.db.prisma_client.pid_is_alive", return_value=True), patch(
@@ -187,3 +191,23 @@ async def test_recreate_prisma_client_without_engine_skips_kill():
     assert events == []
     assert old_client.disconnect_timeouts != []
     assert new_client.connected is True
+
+@pytest.mark.asyncio
+async def test_recreate_prisma_client_never_kills_recycled_pid():
+    """A stale `process.pid` must not be signalled: the PID may belong to someone else."""
+    events = []
+    old_client = _FakePrismaClient(engine_pid=4323)
+    new_client = _FakePrismaClient()
+    wrapper = PrismaWrapper(original_prisma=old_client, iam_token_db_auth=False)
+
+    with _use_fake_prisma_module(new_client), patch(
+        "litellm.proxy.db.prisma_client.is_query_engine_pid", return_value=False
+    ), patch(
+        "litellm.proxy.db.prisma_client.kill_process",
+        side_effect=lambda pid, *a, **k: events.append(("kill", pid)) or True,
+    ), patch("litellm.proxy.db.prisma_client.pid_is_alive", return_value=False):
+        await wrapper.recreate_prisma_client("postgresql://user:pass@host:5432/db")
+
+    assert events == [], "must not signal a PID that is no longer a query engine"
+    assert old_client.disconnect_timeouts != []
+    assert wrapper._original_prisma is new_client

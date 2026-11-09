@@ -15,6 +15,7 @@ from typing import Any, Optional, Union
 from litellm._logging import verbose_proxy_logger
 from litellm.proxy.db.prisma_engine_lifecycle import (
     engine_pid_of,
+    is_query_engine_pid,
     kill_process,
     pid_is_alive,
     reap_child,
@@ -201,6 +202,14 @@ class PrismaWrapper:
 
         old_prisma = self._original_prisma
         old_engine_pid = engine_pid_of(old_prisma)
+        if old_engine_pid and not is_query_engine_pid(old_engine_pid):
+            # ``process.pid`` can be stale (engine already gone and reaped); never
+            # signal a PID that an unrelated process may have recycled.
+            verbose_proxy_logger.debug(
+                "prisma-query-engine PID %s is no longer an engine; skipping kill",
+                old_engine_pid,
+            )
+            old_engine_pid = 0
         if old_engine_pid and kill_process(old_engine_pid):
             verbose_proxy_logger.warning(
                 "Killed stale prisma-query-engine PID %s before reconnect",
