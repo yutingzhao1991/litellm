@@ -48,6 +48,17 @@ PROC_ROOT = "/proc"
 DEFAULT_REAP_INTERVAL_SECONDS = 60.0
 
 
+def reaper_supported(getpid: Callable[[], int] = os.getpid) -> bool:
+    """Whether ``ppid == 1`` can be used to detect orphan engines in this process.
+
+    In multi-worker mode the app runs as PID 1 and every engine's parent is its own
+    worker, so ``ppid == 1`` means "the worker died".  In single-process mode the app
+    *is* PID 1 and its engine's parent is also PID 1 -- the sweep would then kill the
+    engine it is still using, so it must stay off.
+    """
+    return getpid() != 1
+
+
 def engine_pid_of(client: object) -> int:
     """Return the query-engine PID owned by a ``prisma.Prisma`` client, or 0.
 
@@ -106,7 +117,11 @@ def reap_child(pid: int, timeout: float = 1.0) -> bool:
         try:
             waited, _ = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
-            return False  # not our child (already reaped, or reparented)
+            verbose_proxy_logger.debug(
+                "PID %s is not a child of this process; already reaped or reparented",
+                pid,
+            )
+            return False
         except OSError:
             return False
         if waited == pid:
@@ -120,7 +135,8 @@ def _read_cmdline(pid: int, proc_root: str = PROC_ROOT) -> str:
     try:
         with open(os.path.join(proc_root, str(pid), "cmdline"), "rb") as fh:
             return fh.read().replace(b"\x00", b" ").decode("utf-8", "replace")
-    except OSError:
+    except OSError as e:
+        verbose_proxy_logger.debug("Cannot read /proc/%s/cmdline: %s", pid, e)
         return ""
 
 

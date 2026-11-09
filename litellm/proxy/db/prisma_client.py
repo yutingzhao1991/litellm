@@ -197,6 +197,10 @@ class PrismaWrapper:
         error and the old engine is never terminated -- it keeps its memory and its
         Postgres connections for the rest of the worker's life.  Signalling the
         engine up front makes the following waitpid return immediately.
+
+        Re-entering ``close()`` after the engine is dead is safe: CPython's
+        ``Popen.send_signal`` calls ``poll()`` first and returns without signalling
+        once the child has been reaped, and a signal to a zombie is a no-op.
         """
         from prisma import Prisma  # type: ignore
 
@@ -224,11 +228,16 @@ class PrismaWrapper:
             verbose_proxy_logger.warning(f"Failed to disconnect Prisma client: {e}")
 
         if old_engine_pid and pid_is_alive(old_engine_pid):
-            kill_process(old_engine_pid)
-            verbose_proxy_logger.warning(
-                "prisma-query-engine PID %s survived disconnect; killed it",
-                old_engine_pid,
-            )
+            if kill_process(old_engine_pid):
+                verbose_proxy_logger.warning(
+                    "prisma-query-engine PID %s survived disconnect; killed it",
+                    old_engine_pid,
+                )
+            else:
+                verbose_proxy_logger.warning(
+                    "prisma-query-engine PID %s survived disconnect but could not be signalled",
+                    old_engine_pid,
+                )
             # disconnect() raised before its own waitpid: do not leave a zombie
             reap_child(old_engine_pid)
 

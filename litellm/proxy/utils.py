@@ -105,7 +105,11 @@ from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
 from litellm.proxy.db.exception_handler import PrismaDBExceptionHandler
 from litellm.proxy.db.log_db_metrics import log_db_metrics
 from litellm.proxy.db.prisma_client import PrismaWrapper
-from litellm.proxy.db.prisma_engine_lifecycle import OrphanEngineReaper, engine_pid_of
+from litellm.proxy.db.prisma_engine_lifecycle import (
+    OrphanEngineReaper,
+    engine_pid_of,
+    reaper_supported,
+)
 from litellm.proxy.guardrails.guardrail_hooks.unified_guardrail.unified_guardrail import (
     UnifiedLLMGuardrails,
 )
@@ -4077,6 +4081,13 @@ class PrismaClient:
         if self._orphan_engine_reaper_enabled is not True:
             verbose_proxy_logger.debug(
                 "Prisma orphan query-engine reaper disabled via PRISMA_ORPHAN_ENGINE_REAPER_ENABLED"
+            )
+            return
+        if not reaper_supported():
+            # 单进程模式（本进程就是容器 PID 1）：引擎的父进程同样是 PID 1，
+            # ppid==1 不再意味着"worker 已经死了"，扫描会误杀自己正在用的引擎。
+            verbose_proxy_logger.info(
+                "Prisma orphan query-engine reaper stays off: this process is PID 1"
             )
             return
         if self._orphan_engine_reaper_task is not None:

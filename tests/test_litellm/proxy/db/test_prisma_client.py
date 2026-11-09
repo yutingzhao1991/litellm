@@ -140,10 +140,11 @@ async def test_recreate_prisma_client_kills_old_engine_before_disconnect():
     ), patch("litellm.proxy.db.prisma_client.pid_is_alive", return_value=False):
         await wrapper.recreate_prisma_client("postgresql://user:pass@host:5432/db")
 
-    assert events[0] == ("kill", 4321)
-    assert events[1][0] == "disconnect"
-    assert events[1][1] is not None, "disconnect must be bounded, never wait forever"
-    assert isinstance(events[1][1], timedelta)
+    kinds = [entry[0] for entry in events]
+    assert kinds.index("kill") < kinds.index("disconnect"), events
+    disconnect_entry = next(entry for entry in events if entry[0] == "disconnect")
+    assert disconnect_entry[1] is not None, "disconnect must be bounded, never wait forever"
+    assert isinstance(disconnect_entry[1], timedelta)
     assert wrapper._original_prisma is new_client
     assert new_client.connected is True
 

@@ -16,6 +16,7 @@ from litellm.proxy.db.prisma_engine_lifecycle import (
     is_query_engine_pid,
     pid_is_alive,
     read_ppid,
+    reaper_supported,
     reap_child,
     reap_orphan_query_engines,
 )
@@ -157,7 +158,6 @@ def test_reap_child_reaps_exited_child():
 
     proc = subprocess.Popen(["true"])
     assert reap_child(proc.pid, timeout=2.0) is True
-    proc.poll()
 
 
 def test_reap_child_returns_false_for_non_child():
@@ -173,3 +173,8 @@ def test_is_query_engine_pid(tmp_path):
     assert is_query_engine_pid(200, str(tmp_path)) is False
     assert is_query_engine_pid(999, str(tmp_path)) is False
     assert is_query_engine_pid(0, str(tmp_path)) is False
+
+
+def test_reaper_supported_refuses_pid_one():
+    assert reaper_supported(lambda: 1) is False
+    assert reaper_supported(lambda: 4242) is True
