@@ -105,6 +105,7 @@ from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
 from litellm.proxy.db.exception_handler import PrismaDBExceptionHandler
 from litellm.proxy.db.log_db_metrics import log_db_metrics
 from litellm.proxy.db.prisma_client import PrismaWrapper
+from litellm.proxy.db.prisma_engine_lifecycle import OrphanEngineReaper, engine_pid_of
 from litellm.proxy.guardrails.guardrail_hooks.unified_guardrail.unified_guardrail import (
     UnifiedLLMGuardrails,
 )
@@ -2280,6 +2281,15 @@ class PrismaClient:
             )  # Client to connect to Prisma db
         self._db_reconnect_lock = asyncio.Lock()
         self._db_health_watchdog_task: Optional[asyncio.Task] = None
+        self._orphan_engine_reaper_task: Optional[asyncio.Task] = None
+        self._orphan_engine_reaper_enabled: bool = (
+            str_to_bool(os.getenv("PRISMA_ORPHAN_ENGINE_REAPER_ENABLED", "true"))
+            is True
+        )
+        self._orphan_engine_reaper_interval_seconds: float = max(
+            5.0,
+            float(os.getenv("PRISMA_ORPHAN_ENGINE_REAP_INTERVAL_SECONDS", "60")),
+        )
         self._db_last_reconnect_attempt_ts: float = 0.0
         self._db_reconnect_cooldown_seconds: int = max(
             1, int(os.getenv("PRISMA_RECONNECT_COOLDOWN_SECONDS", "15"))
@@ -4022,7 +4032,9 @@ class PrismaClient:
     async def start_db_health_watchdog_task(self) -> None:
         """Start background tasks that monitor DB health:
         - A periodic SELECT 1 probe that triggers reconnect on network/connection failure.
-        - A process-level watcher that detects engine death via waitpid thread, pidfd, or os.kill polling."""
+        - A process-level watcher that detects engine death via waitpid thread, pidfd, or os.kill polling.
+        - A low-frequency sweep that reaps query engines whose owning worker is gone."""
+        self._start_orphan_engine_reaper()
         if self._db_health_watchdog_enabled is not True:
             verbose_proxy_logger.debug(
                 "Prisma DB health watchdog disabled via PRISMA_HEALTH_WATCHDOG_ENABLED"
@@ -4042,8 +4054,58 @@ class PrismaClient:
         )
         await self._start_engine_watcher()
 
+    def _live_engine_pids(self) -> List[int]:
+        """Engine PIDs owned by this worker; the reaper must never touch them."""
+        pids: List[int] = []
+        engine_pid = getattr(self, "_engine_pid", 0)
+        if engine_pid:
+            pids.append(engine_pid)
+        current = engine_pid_of(getattr(self.db, "_original_prisma", None))
+        if current:
+            pids.append(current)
+        return pids
+
+    def _start_orphan_engine_reaper(self) -> None:
+        """Reap query engines left behind by workers that were killed.
+
+        A worker can be SIGKILLed by the uvicorn supervisor (``Child process [x]
+        died``), which no in-process cleanup can intercept: its Prisma query engine
+        gets reparented to PID 1 and keeps its memory for good.  The sweep kills
+        exactly those processes (``ppid == 1``) and never a live engine, whose
+        parent is always the worker that spawned it.
+        """
+        if self._orphan_engine_reaper_enabled is not True:
+            verbose_proxy_logger.debug(
+                "Prisma orphan query-engine reaper disabled via PRISMA_ORPHAN_ENGINE_REAPER_ENABLED"
+            )
+            return
+        if self._orphan_engine_reaper_task is not None:
+            return
+        reaper = OrphanEngineReaper(
+            interval_seconds=self._orphan_engine_reaper_interval_seconds,
+            exclude_pids=self._live_engine_pids,
+        )
+        self._orphan_engine_reaper_task = asyncio.create_task(reaper.loop())
+        verbose_proxy_logger.info(
+            "Started Prisma orphan query-engine reaper (interval=%ss)",
+            self._orphan_engine_reaper_interval_seconds,
+        )
+
+    async def _stop_orphan_engine_reaper(self) -> None:
+        task = self._orphan_engine_reaper_task
+        self._orphan_engine_reaper_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        verbose_proxy_logger.info("Stopped Prisma orphan query-engine reaper")
+
     async def stop_db_health_watchdog_task(self) -> None:
         """Stop DB health watchdog task and engine watcher gracefully."""
+        await self._stop_orphan_engine_reaper()
         self._stop_engine_watcher()
         if self._db_health_watchdog_task is None:
             return

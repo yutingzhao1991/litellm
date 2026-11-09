@@ -13,6 +13,11 @@ from datetime import datetime, timedelta
 from typing import Any, Optional, Union
 
 from litellm._logging import verbose_proxy_logger
+from litellm.proxy.db.prisma_engine_lifecycle import (
+    engine_pid_of,
+    kill_process,
+    pid_is_alive,
+)
 from litellm.secret_managers.main import str_to_bool
 
 
@@ -35,6 +40,11 @@ class PrismaWrapper:
 
     # Fallback refresh interval if token parsing fails (10 minutes)
     FALLBACK_REFRESH_INTERVAL_SECONDS = 600
+
+    # Upper bound for tearing down the old query engine during a reconnect.
+    # prisma-client-py 0.11 waits for the engine with no timeout, so the engine is
+    # signalled first; this bound only guards the (then immediate) waitpid.
+    DISCONNECT_TIMEOUT_SECONDS = 5
 
     def __init__(self, original_prisma: Any, iam_token_db_auth: bool):
         self._original_prisma = original_prisma
@@ -176,13 +186,39 @@ class PrismaWrapper:
     async def recreate_prisma_client(
         self, new_db_url: str, http_client: Optional[Any] = None
     ):
-        """Disconnect and reconnect the Prisma client with a new database URL."""
+        """Disconnect and reconnect the Prisma client with a new database URL.
+
+        The old query engine is killed *before* ``disconnect()``: prisma-client-py
+        0.11 implements ``QueryEngine.close()`` as ``send_signal(SIGINT)`` plus
+        ``process.wait(timeout=None)``, so an engine that refuses to exit blocks the
+        worker event loop, and when the wait raises ``disconnect()`` propagates the
+        error and the old engine is never terminated -- it keeps its memory and its
+        Postgres connections for the rest of the worker's life.  Signalling the
+        engine up front makes the following waitpid return immediately.
+        """
         from prisma import Prisma  # type: ignore
 
+        old_prisma = self._original_prisma
+        old_engine_pid = engine_pid_of(old_prisma)
+        if old_engine_pid and kill_process(old_engine_pid):
+            verbose_proxy_logger.warning(
+                "Killed stale prisma-query-engine PID %s before reconnect",
+                old_engine_pid,
+            )
+
         try:
-            await self._original_prisma.disconnect()
+            await old_prisma.disconnect(
+                timeout=timedelta(seconds=self.DISCONNECT_TIMEOUT_SECONDS)
+            )
         except Exception as e:
             verbose_proxy_logger.warning(f"Failed to disconnect Prisma client: {e}")
+
+        if old_engine_pid and pid_is_alive(old_engine_pid):
+            kill_process(old_engine_pid)
+            verbose_proxy_logger.warning(
+                "prisma-query-engine PID %s survived disconnect; killed it",
+                old_engine_pid,
+            )
 
         if http_client is not None:
             self._original_prisma = Prisma(http=http_client)
