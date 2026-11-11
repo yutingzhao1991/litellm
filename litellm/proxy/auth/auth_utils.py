@@ -170,8 +170,28 @@ def _first_nested_banned_param(
     return None
 
 
+# 管理配置端点：请求体本身就是模型/配置定义，`litellm_params.api_base` 是合法字段，
+# 而且这些端点要求 proxy admin。CVE-2026-84377 / CVE-2026-59823 针对的是普通虚拟 key
+# 在 chat 请求里夹带 api_base，不能把管理操作一起拦掉——否则任何带自定义上游地址的
+# 模型都无法新增/更新（`POST /model/new` 直接 401）。
+_MANAGEMENT_CONFIG_ROUTES = ("/model/new", "/model/update", "/config/update")
+
+
+def _is_management_config_route(route: Optional[str]) -> bool:
+    if not route:
+        return False
+    if route in _MANAGEMENT_CONFIG_ROUTES:
+        return True
+    # `/model/{model_id}/update` 是 PATCH 存储模型的正式入口
+    return re.fullmatch(r"/model/[^/]+/update", route) is not None
+
+
 def is_request_body_safe(
-    request_body: dict, general_settings: dict, llm_router: Optional[Router], model: str
+    request_body: dict,
+    general_settings: dict,
+    llm_router: Optional[Router],
+    model: str,
+    route: Optional[str] = None,
 ) -> bool:
     """
     Check if the request body is safe.
@@ -207,6 +227,8 @@ def is_request_body_safe(
             )
 
     if general_settings.get("allow_client_side_credentials") is not True:
+        if _is_management_config_route(route):
+            return True
         nested_param = _first_nested_banned_param(
             {key: value for key, value in request_body.items() if key not in banned_params},
             banned_params,
@@ -251,6 +273,7 @@ async def pre_db_read_auth_checks(
         model=request_data.get(
             "model", ""
         ),  # [TODO] use model passed in url as well (azure openai routes)
+        route=route,
     )
 
     # Check 3. Check if IP address is allowed
