@@ -2534,7 +2534,7 @@ class PrismaClient:
             raise e
 
     async def _query_first_with_cached_plan_fallback(
-        self, sql_query: str
+        self, sql_query: str, *args
     ) -> Optional[dict]:
         """
         Execute a query with automatic fallback for PostgreSQL cached plan errors.
@@ -2545,6 +2545,9 @@ class PrismaClient:
 
         Args:
             sql_query: SQL query string to execute
+            *args: values bound to the query's `$1`...`$n` placeholders. Always
+                pass caller/user input this way instead of interpolating it into
+                `sql_query` — see CVE-2026-42208.
 
         Returns:
             Query result or None
@@ -2553,7 +2556,7 @@ class PrismaClient:
             Original exception if not a cached plan error
         """
         try:
-            return await self.db.query_first(query=sql_query)
+            return await self.db.query_first(sql_query, *args)
         except Exception as e:
             error_str = str(e)
             if "cached plan must not change result type" in error_str:
@@ -2568,7 +2571,7 @@ class PrismaClient:
                     "retrying with fresh plan. This may occur during rolling deployments "
                     "when schema changes are applied."
                 )
-                return await self.db.query_first(query=sql_query_retry)
+                return await self.db.query_first(sql_query_retry, *args)
             else:
                 raise
 
@@ -2853,21 +2856,27 @@ class PrismaClient:
                     response = await self.db.litellm_usernotifications.find_many()  # type: ignore
                 return response
             elif table_name == "combined_view":
-                # check if plain text or hash
-                if token is not None:
-                    if isinstance(token, str):
-                        hashed_token = _hash_token_if_needed(token=token)
-                        verbose_proxy_logger.debug(
-                            f"PrismaClient: find_unique for token: {hashed_token}"
-                        )
                 if query_type == "find_unique":
                     if token is None:
                         raise HTTPException(
                             status_code=400,
                             detail={"error": f"No token passed in. Token={token}"},
                         )
+                    if not isinstance(token, str):
+                        raise HTTPException(
+                            status_code=400,
+                            detail={"error": "Invalid token passed in."},
+                        )
+                    # SECURITY (CVE-2026-42208): the raw bearer of a *failed* auth
+                    # request reaches this lookup without ever being hashed, so
+                    # this query must not interpolate it. Normalize to the value
+                    # stored in the DB and bind it as a parameter (`$1`) instead.
+                    hashed_token = _hash_token_if_needed(token=token)
+                    verbose_proxy_logger.debug(
+                        f"PrismaClient: find_unique for token: {hashed_token}"
+                    )
 
-                    sql_query = f"""
+                    sql_query = """
                         SELECT 
                             v.*,
                             t.spend AS team_spend, 
@@ -2902,11 +2911,11 @@ class PrismaClient:
                         LEFT JOIN "LiteLLM_BudgetTable" AS b ON v.budget_id = b.budget_id
                         LEFT JOIN "LiteLLM_OrganizationTable" AS o ON v.organization_id = o.organization_id
                         LEFT JOIN "LiteLLM_BudgetTable" AS b2 ON o.budget_id = b2.budget_id
-                        WHERE v.token = '{token}'
+                        WHERE v.token = $1
                     """
 
                     response = await self._query_first_with_cached_plan_fallback(
-                        sql_query
+                        sql_query, hashed_token
                     )
 
                     # If not found in main table, check deprecated keys (grace period)
