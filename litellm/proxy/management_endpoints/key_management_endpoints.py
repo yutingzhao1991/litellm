@@ -1149,6 +1149,38 @@ async def generate_key_fn(
     - expires: (datetime) Datetime object for when key expires.
     - user_id: (str) Unique user id - used for tracking spend across multiple keys for same user id.
     """
+    # SECURITY (CVE-2026-47101): `allowed_routes` is stored without checking it
+    # against the caller's own permissions, so an internal user could mint a key
+    # that reaches admin-only management routes.
+    _requested_routes = list(getattr(data, "allowed_routes", None) or [])
+    if _requested_routes and getattr(user_api_key_dict, "user_role", None) != LitellmUserRoles.PROXY_ADMIN.value:
+        _admin_route_prefixes = (
+            "/key",
+            "/user",
+            "/team",
+            "/model",
+            "/config",
+            "/spend",
+            "/mcp",
+            "/prompts",
+            "/cache",
+            "/health",
+            "/v1/mcp",
+        )
+        _blocked = [
+            route
+            for route in _requested_routes
+            if isinstance(route, str) and route.startswith(_admin_route_prefixes)
+        ]
+        if _blocked:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "Only proxy admins can create keys with management routes in allowed_routes: "
+                    + ", ".join(_blocked)
+                },
+            )
+
     try:
         from litellm.proxy._types import CommonProxyErrors
         from litellm.proxy.proxy_server import (

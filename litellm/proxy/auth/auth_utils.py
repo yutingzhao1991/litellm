@@ -141,6 +141,35 @@ def _allow_model_level_clientside_configurable_parameters(
     )
 
 
+def _first_nested_banned_param(
+    value: object, banned_params: list, path: str = "", depth: int = 0
+) -> Optional[str]:
+    """Return the dotted path of a banned param nested inside request data.
+
+    Top-level keys are handled by `is_request_body_safe` itself; this walk covers
+    params smuggled inside another field (e.g. ``user_config.api_base``), which the
+    router would otherwise apply to the outbound request.
+    """
+    if depth > 8:
+        return None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            child = f"{path}.{key}" if path else key
+            if key in banned_params and path:
+                return child
+            found = _first_nested_banned_param(item, banned_params, child, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            found = _first_nested_banned_param(item, banned_params, f"{path}[{index}]", depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
 def is_request_body_safe(
     request_body: dict, general_settings: dict, llm_router: Optional[Router], model: str
 ) -> bool:
@@ -175,6 +204,18 @@ def is_request_body_safe(
                 f"Rejected Request: {param} is not allowed in request body. "
                 "Enable with `general_settings::allow_client_side_credentials` on proxy config.yaml. "
                 "Relevant Issue: https://huntr.com/bounties/4001e1a2-7b7a-4776-a3ae-e6692ec3d997",
+            )
+
+    if general_settings.get("allow_client_side_credentials") is not True:
+        nested_param = _first_nested_banned_param(
+            {key: value for key, value in request_body.items() if key not in banned_params},
+            banned_params,
+        )
+        if nested_param is not None:
+            raise ValueError(
+                f"Rejected Request: {nested_param} is not allowed in request body. "
+                "Nested routing/credential params (e.g. user_config.api_base) are rejected "
+                "unless `general_settings::allow_client_side_credentials` is enabled."
             )
 
     return True

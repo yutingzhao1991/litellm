@@ -11497,12 +11497,23 @@ async def invitation_delete(
     dependencies=[Depends(user_api_key_auth)],
     include_in_schema=False,
 )
-async def update_config(config_info: ConfigYAML):  # noqa: PLR0915
+async def update_config(
+    config_info: ConfigYAML,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):  # noqa: PLR0915
     """
     For Admin UI - allows admin to update config via UI
 
     Currently supports modifying General Settings + LiteLLM settings
     """
+    # SECURITY (CVE-2026-35029): this endpoint rewrites proxy config / env vars and
+    # can register pass-through handlers, so it must be proxy-admin only. It is not
+    # covered by the generic management-route guard.
+    if getattr(user_api_key_dict, "user_role", None) != LitellmUserRoles.PROXY_ADMIN.value:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "Only proxy admins can update proxy config."},
+        )
     global llm_router, llm_model_list, general_settings, proxy_config, proxy_logging_obj, master_key, prisma_client
     try:
         import base64

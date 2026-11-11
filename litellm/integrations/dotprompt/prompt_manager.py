@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
-from jinja2 import DictLoader, Environment, select_autoescape
+from jinja2 import DictLoader, select_autoescape
+from jinja2.sandbox import SandboxedEnvironment as Environment
 
 
 class PromptTemplate:

@@ -1098,6 +1098,28 @@ async def user_update(
         - prompts: Optional[List[str]] - List of allowed prompts for the user. If specified, the user will only be able to use these specific prompts.
     
     """
+    # SECURITY (CVE-2026-47102): any user may update their own account, but role /
+    # budget / permission fields are privilege-escalation vectors. Only proxy admins
+    # may change them.
+    _privileged_fields = (
+        "user_role",
+        "spend",
+        "max_budget",
+        "models",
+        "permissions",
+        "policies",
+        "guardrails",
+        "object_permission",
+        "allowed_cache_controls",
+    )
+    if getattr(user_api_key_dict, "user_role", None) != LitellmUserRoles.PROXY_ADMIN.value:
+        _requested = [name for name in _privileged_fields if getattr(data, name, None) is not None]
+        if _requested:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": f"Only proxy admins can update: {', '.join(_requested)}"},
+            )
+
     try:
         verbose_proxy_logger.debug("/user/update: Received data = %s", data)
 
