@@ -1702,12 +1702,22 @@ async def ui_view_spend_logs(  # noqa: PLR0915
         default=None,
         description="Filter logs by client OS keyword (matches User-Agent tag substring)",
     ),
+    request_tag: Optional[str] = fastapi.Query(
+        default=None,
+        description=(
+            "Filter logs by an exact request tag (e.g. 'solution:feelfish-default'). "
+            "Exact match instead of substring so 'solution:a' never picks up 'solution:ab'."
+        ),
+    ),
 ):
     """
     View spend logs with pagination support.
     Available at both `/spend/logs/v2` (public API) and `/spend/logs/ui` (internal UI).
 
     Returns paginated response with data, total, page, page_size, and total_pages.
+
+    `request_tag` filters on the exact `request_tags` entry (e.g. `solution:<id>`), while
+    `user_agent_version` / `user_agent_os` keep their substring semantics for the UA tags.
 
     Example:
     ```
@@ -1945,6 +1955,12 @@ async def ui_view_spend_logs(  # noqa: PLR0915
             )
             sql_params.append(user_agent_os)
             p += 1
+        # Exact request-tag match (solution/agent/surface/phase/...)，用 jsonb 包含而不是
+        # 子串匹配：标签是「key:value」，子串会让 solution:a 命中 solution:ab。
+        if request_tag is not None:
+            sql_conditions.append(f"request_tags @> ${p}::jsonb")
+            sql_params.append(json.dumps([request_tag]))
+            p += 1
 
         # Get total count of records（与列表共用同一 SQL 过滤条件，保证分页与总数一致）
         count_sql = (
@@ -1993,6 +2009,96 @@ async def ui_view_spend_logs(  # noqa: PLR0915
         )
     except Exception as e:
         verbose_proxy_logger.exception(f"Error in ui_view_spend_logs: {e}")
+        raise handle_exception_on_proxy(e)
+
+
+@router.get(
+    "/spend/logs/tags",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+    responses={
+        200: {"model": Dict[str, Any]},
+    },
+)
+async def ui_view_spend_log_tags(
+    start_date: str = fastapi.Query(
+        description="Window start (UTC), 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'",
+    ),
+    end_date: str = fastapi.Query(
+        description="Window end (UTC), 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'",
+    ),
+    limit: int = fastapi.Query(
+        default=5000,
+        ge=1,
+        le=5000,
+        description="Max tag entries to return (ordered by request volume)",
+    ),
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Distinct request tags seen in the window, for the admin request-log tag filter
+    (e.g. `solution:` / `agent:` / `surface:` prefixes).
+
+    Reads the pre-aggregated `LiteLLM_DailyTagSpend` table instead of scanning
+    `LiteLLM_SpendLogs`: the logs table is hundreds of GB, and grouping its jsonb
+    `request_tags` over a wide window takes seconds. The aggregate lags the logs by a
+    few minutes, which is fine for building filter options (the filter itself always
+    runs on the raw logs).
+    """
+    from litellm.proxy.proxy_server import prisma_client
+
+    if prisma_client is None:
+        raise ProxyException(
+            message="Prisma Client is not initialized",
+            type="internal_error",
+            param="None",
+            code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # 全局标签集合只对管理员开放：普通 key 拿到的应该是「只属于自己」的数据，
+    # 这里没有按 key 收敛的口径，直接拒绝而不是悄悄泄露别人的方案/智能体名。
+    if not _is_admin_view_safe(user_api_key_dict=user_api_key_dict):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "Only proxy admins can list request tags"},
+        )
+
+    formats = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
+
+    def parse_date(date_str: str) -> datetime:
+        date_str = date_str.strip()
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid date format: {date_str}. Expected 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'",
+        )
+
+    start_day = parse_date(start_date).date().isoformat()
+    end_day = parse_date(end_date).date().isoformat()
+
+    try:
+        rows = await prisma_client.db.query_raw(
+            'SELECT tag, SUM(api_requests)::bigint AS requests '
+            'FROM "LiteLLM_DailyTagSpend" '
+            "WHERE date >= $1 AND date <= $2 AND tag IS NOT NULL "
+            "GROUP BY tag ORDER BY requests DESC, tag ASC LIMIT $3",
+            start_day,
+            end_day,
+            limit,
+        )
+        return {
+            "data": [
+                {"tag": row["tag"], "requests": int(row["requests"] or 0)}
+                for row in rows
+                if row.get("tag")
+            ]
+        }
+    except Exception as e:
+        verbose_proxy_logger.exception(f"Error in ui_view_spend_log_tags: {e}")
         raise handle_exception_on_proxy(e)
 
 
