@@ -33,6 +33,18 @@ from litellm.types.proxy.prompt_endpoints import TestPromptRequest
 router = APIRouter()
 
 
+def _require_proxy_admin(user_api_key_dict: UserAPIKeyAuth, action: str) -> None:
+    """
+    SECURITY: prompt management endpoints render user-supplied templates and can
+    trigger outbound model calls, so they are restricted to proxy admins.
+    """
+    if user_api_key_dict.user_role is None or (
+        user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN
+        and user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN.value
+    ):
+        raise HTTPException(status_code=403, detail=f"Only proxy admins can {action}")
+
+
 def get_base_prompt_id(prompt_id: str) -> str:
     """
     Extract the base prompt ID by stripping the version suffix if present.
@@ -1030,6 +1042,8 @@ async def test_prompt(
         }'
     ```
     """
+    _require_proxy_admin(user_api_key_dict, "test prompts")
+
     from pydantic import BaseModel
 
     from litellm.integrations.dotprompt.dotprompt_manager import DotpromptManager
@@ -1161,6 +1175,8 @@ async def convert_prompt_file_to_json(
 
     Returns the JSON structure with 'content' and 'metadata' fields.
     """
+    _require_proxy_admin(user_api_key_dict, "convert prompt files")
+
     global general_settings
     from litellm.integrations.dotprompt.prompt_manager import PromptManager
 

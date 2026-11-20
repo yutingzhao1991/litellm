@@ -30,9 +30,32 @@ class PromptTemplate:
         self.input_schema = self.metadata.get("input", {}).get("schema", {})
         self.output_format = self.metadata.get("output", {}).get("format")
         self.output_schema = self.metadata.get("output", {}).get("schema", {})
+        # SECURITY: frontmatter is user-controlled YAML. Only sampling/formatting
+        # params may reach the model call -- connection and credential keys would
+        # let a template redirect the request (SSRF) or override credentials.
+        dangerous_keys = {
+            "api_base",
+            "base_url",
+            "api_key",
+            "api_version",
+            "api_type",
+            "custom_llm_provider",
+            "extra_headers",
+            "extra_body",
+            "headers",
+            "mock_response",
+            "litellm_params",
+            "organization",
+            "client",
+            "http_client",
+            "aclient",
+            "fallbacks",
+            "context_window_fallbacks",
+            "metadata",
+        }
         self.optional_params = {}
         for key in self.metadata.keys():
-            if key not in restricted_keys:
+            if key not in restricted_keys and key not in dangerous_keys:
                 self.optional_params[key] = self.metadata[key]
 
     def __repr__(self):
