@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -751,6 +752,101 @@ def _convert_to_json_serializable_dict(
             visited.remove(obj_id)
 
 
+SPEND_LOG_TRUNCATION_DEFAULT_SKIP_TAGS = ("phase:summary",)
+
+
+def _get_spend_log_truncation_config() -> dict:
+    """读取 SpendLogs 请求体裁剪配置（general_settings.spend_log_truncation，env 兜底）。
+
+    默认全部关闭，部署后通过 LiteLLM_Config 的 general_settings 开启，例如：
+      spend_log_truncation:
+        enabled: true
+        truncate_messages_from_last_user: true
+        compress_tool_description_max_chars: 120
+        skip_tags: ["phase:summary"]
+    """
+    from litellm.proxy.proxy_server import general_settings
+    from litellm.secret_managers.main import get_secret_bool
+
+    raw = general_settings.get("spend_log_truncation")
+    cfg = raw if isinstance(raw, dict) else {}
+    result = {
+        "enabled": cfg.get("enabled"),
+        "truncate_messages_from_last_user": cfg.get("truncate_messages_from_last_user"),
+        "compress_tool_description_max_chars": cfg.get(
+            "compress_tool_description_max_chars"
+        ),
+        "skip_tags": cfg.get("skip_tags"),
+    }
+    if result["enabled"] is None:
+        result["enabled"] = get_secret_bool("SPEND_LOG_TRUNCATION_ENABLED") is True
+    if result["truncate_messages_from_last_user"] is None:
+        result["truncate_messages_from_last_user"] = True
+    if result["compress_tool_description_max_chars"] is None:
+        env_val = os.environ.get("SPEND_LOG_COMPRESS_TOOL_DESCRIPTION_MAX_CHARS")
+        result["compress_tool_description_max_chars"] = (
+            int(env_val) if env_val and str(env_val).isdigit() else 0
+        )
+    if result["skip_tags"] is None:
+        result["skip_tags"] = list(SPEND_LOG_TRUNCATION_DEFAULT_SKIP_TAGS)
+    return result
+
+
+def _truncate_spend_log_request_body(
+    body: dict, metadata: Optional[dict]
+) -> dict:
+    """按配置裁剪写入 SpendLogs 的请求体：只影响日志，不影响转发给模型的请求。"""
+    cfg = _get_spend_log_truncation_config()
+    if not cfg.get("enabled"):
+        return body
+
+    tags = (metadata or {}).get("tags") or []
+    skip_tags = set(cfg.get("skip_tags") or [])
+    if isinstance(tags, (list, tuple)) and any(tag in skip_tags for tag in tags):
+        return body  # 总结/压缩等请求保留完整内容（tag 命中 skip_tags）
+
+    truncated = copy.deepcopy(body)
+
+    if cfg.get("truncate_messages_from_last_user", True):
+        messages = truncated.get("messages")
+        if isinstance(messages, list) and messages:
+            last_user_index = -1
+            for index, message in enumerate(messages):
+                if isinstance(message, dict) and message.get("role") == "user":
+                    last_user_index = index
+            if last_user_index > 0:
+                truncated["messages"] = messages[last_user_index:]
+
+    max_chars = int(cfg.get("compress_tool_description_max_chars") or 0)
+    if max_chars > 0:
+        tools = truncated.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                function = tool.get("function") if isinstance(tool, dict) else None
+                if not isinstance(function, dict):
+                    continue
+                description = function.get("description")
+                if isinstance(description, str) and len(description) > max_chars:
+                    function["description"] = description[:max_chars] + "…"
+                parameters = function.get("parameters")
+                properties = (
+                    parameters.get("properties")
+                    if isinstance(parameters, dict)
+                    else None
+                )
+                if isinstance(properties, dict):
+                    for prop in properties.values():
+                        if isinstance(prop, dict):
+                            prop_description = prop.get("description")
+                            if (
+                                isinstance(prop_description, str)
+                                and len(prop_description) > max_chars
+                            ):
+                                prop["description"] = prop_description[:max_chars] + "…"
+
+    return truncated
+
+
 def _get_proxy_server_request_for_spend_logs_payload(
     metadata: dict,
     litellm_params: dict,
@@ -795,6 +891,9 @@ def _get_proxy_server_request_for_spend_logs_payload(
                     perform_redaction(model_call_details=_request_body, result=None)
             
             _request_body = _sanitize_request_body_for_spend_logs_payload(_request_body)
+            _request_body = _truncate_spend_log_request_body(
+                _request_body, metadata=metadata
+            )
             _request_body_json_str = json.dumps(_request_body, default=str)
             return _request_body_json_str
     return "{}"
