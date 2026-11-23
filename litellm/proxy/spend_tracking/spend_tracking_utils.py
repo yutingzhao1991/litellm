@@ -815,7 +815,13 @@ def _truncate_spend_log_request_body(
                 if isinstance(message, dict) and message.get("role") == "user":
                     last_user_index = index
             if last_user_index > 0:
-                truncated["messages"] = messages[last_user_index:]
+                # 保留 system 提示词（分析/排查需要），其余历史只留最后一个 user 之后。
+                system_messages = [
+                    message
+                    for message in messages[:last_user_index]
+                    if isinstance(message, dict) and message.get("role") == "system"
+                ]
+                truncated["messages"] = system_messages + messages[last_user_index:]
 
     max_chars = int(cfg.get("compress_tool_description_max_chars") or 0)
     if max_chars > 0:
