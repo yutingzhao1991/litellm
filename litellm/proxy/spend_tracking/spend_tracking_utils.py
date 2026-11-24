@@ -49,8 +49,10 @@ def _get_max_string_length_prompt_in_db() -> int:
         return DEFAULT_MAX_STRING_LENGTH_PROMPT_IN_DB
 
 
-def _is_master_key(api_key: str, _master_key: Optional[str]) -> bool:
-    if _master_key is None:
+def _is_master_key(api_key: Optional[str], _master_key: Optional[str]) -> bool:
+    # 未带 key 的请求（例如 /key/eligible 的 ALB 探针）也会走到 spend log 写入路径，
+    # compare_digest(None, str) 会抛 TypeError 并把请求打成 500，这里必须先挡空值。
+    if api_key is None or _master_key is None:
         return False
 
     ## string comparison
