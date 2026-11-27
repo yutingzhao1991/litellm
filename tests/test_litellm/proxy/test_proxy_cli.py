@@ -663,3 +663,23 @@ class TestHealthAppFactory:
                 standalone_mode=False,
             )
             mock_setup_database.assert_called_with(use_migrate=False)
+
+
+class TestGracefulShutdownTimeout:
+    """Cap the uvicorn graceful-shutdown wait so a worker restart cannot hang on ALB keep-alive."""
+
+    def test_default_caps_shutdown_wait(self):
+        from litellm.proxy.proxy_cli import _get_graceful_shutdown_timeout
+
+        assert _get_graceful_shutdown_timeout(None) == 600
+
+    def test_explicit_value_is_used(self):
+        from litellm.proxy.proxy_cli import _get_graceful_shutdown_timeout
+
+        assert _get_graceful_shutdown_timeout(300) == 300
+
+    def test_zero_or_negative_disables_cap(self):
+        from litellm.proxy.proxy_cli import _get_graceful_shutdown_timeout
+
+        assert _get_graceful_shutdown_timeout(0) is None
+        assert _get_graceful_shutdown_timeout(-1) is None

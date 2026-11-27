@@ -365,6 +365,25 @@ class ProxyInitializationHelpers:
         print(f"LiteLLM: {action} PROMETHEUS_MULTIPROC_DIR={multiproc_dir}")  # noqa
 
 
+DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT = 600
+
+
+def _get_graceful_shutdown_timeout(value: Optional[int]) -> Optional[int]:
+    """
+    Resolve the uvicorn ``timeout_graceful_shutdown`` value.
+
+    - unset -> 600 seconds. Without a cap, a worker that hit
+      ``MAX_REQUESTS_BEFORE_RESTART`` can wait indefinitely for connections to
+      close: the ALB keeps reusing its keep-alive connections, so the worker
+      never sees an idle moment and a rolling restart can take 80+ minutes.
+    - ``<= 0`` -> None (wait indefinitely; the uvicorn default before this option).
+    """
+    resolved = DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT if value is None else value
+    if resolved <= 0:
+        return None
+    return resolved
+
+
 @click.command()
 @click.option(
     "--host", default="0.0.0.0", help="Host for the server to listen on.", envvar="HOST"
@@ -555,6 +574,16 @@ class ProxyInitializationHelpers:
     help="Restart worker after this many requests (uvicorn: limit_max_requests, gunicorn: max_requests)",
     envvar="MAX_REQUESTS_BEFORE_RESTART",
 )
+@click.option(
+    "--graceful_shutdown_timeout",
+    default=None,
+    type=int,
+    help=(
+        "Cap the uvicorn graceful shutdown wait in seconds (timeout_graceful_shutdown). "
+        "Defaults to 600; set to 0 to wait indefinitely (old behaviour)."
+    ),
+    envvar="LITELLM_GRACEFUL_SHUTDOWN_TIMEOUT",
+)
 def run_server(  # noqa: PLR0915
     host,
     port,
@@ -594,6 +623,7 @@ def run_server(  # noqa: PLR0915
     skip_server_startup,
     keepalive_timeout,
     max_requests_before_restart,
+    graceful_shutdown_timeout,
 ):
     args = locals()
     if local:
@@ -896,6 +926,9 @@ def run_server(  # noqa: PLR0915
         # Optional: recycle uvicorn workers after N requests
         if max_requests_before_restart is not None:
             uvicorn_args["limit_max_requests"] = max_requests_before_restart
+        graceful_timeout = _get_graceful_shutdown_timeout(graceful_shutdown_timeout)
+        if graceful_timeout is not None:
+            uvicorn_args["timeout_graceful_shutdown"] = graceful_timeout
         if run_gunicorn is False and run_hypercorn is False:
             if ssl_certfile_path is not None and ssl_keyfile_path is not None:
                 print(  # noqa
