@@ -671,7 +671,7 @@ class TestGracefulShutdownTimeout:
     def test_default_caps_shutdown_wait(self):
         from litellm.proxy.proxy_cli import _get_graceful_shutdown_timeout
 
-        assert _get_graceful_shutdown_timeout(None) == 600
+        assert _get_graceful_shutdown_timeout(None) == 1800
 
     def test_explicit_value_is_used(self):
         from litellm.proxy.proxy_cli import _get_graceful_shutdown_timeout
@@ -683,3 +683,93 @@ class TestGracefulShutdownTimeout:
 
         assert _get_graceful_shutdown_timeout(0) is None
         assert _get_graceful_shutdown_timeout(-1) is None
+
+    @patch("uvicorn.run")
+    @patch("builtins.print")
+    @patch("litellm.proxy.db.prisma_client.PrismaManager.setup_database")
+    def test_graceful_shutdown_timeout_flag(self, mock_setup_db, mock_print, mock_uvicorn_run):
+        """--graceful_shutdown_timeout must reach uvicorn as timeout_graceful_shutdown."""
+        from click.testing import CliRunner
+
+        from litellm.proxy.proxy_cli import run_server
+
+        runner = CliRunner()
+        mock_app = MagicMock()
+        mock_proxy_config = MagicMock()
+        mock_key_mgmt = MagicMock()
+        mock_save_worker_config = MagicMock()
+
+        clean_env = {k: v for k, v in os.environ.items() if k not in ("DATABASE_URL", "DIRECT_URL")}
+        with patch.dict(
+            os.environ, clean_env, clear=True,
+        ), patch.dict(
+            "sys.modules",
+            {
+                "proxy_server": MagicMock(
+                    app=mock_app,
+                    ProxyConfig=mock_proxy_config,
+                    KeyManagementSettings=mock_key_mgmt,
+                    save_worker_config=mock_save_worker_config,
+                )
+            },
+        ), patch(
+            "litellm.proxy.proxy_cli.ProxyInitializationHelpers._get_default_unvicorn_init_args"
+        ) as mock_get_args:
+            mock_get_args.return_value = {
+                "app": "litellm.proxy.proxy_server:app",
+                "host": "localhost",
+                "port": 8000,
+            }
+
+            result = runner.invoke(
+                run_server, ["--local", "--graceful_shutdown_timeout", "42"]
+            )
+
+            assert result.exit_code == 0, f"exit_code={result.exit_code}, output={result.output}"
+            mock_uvicorn_run.assert_called_once()
+            assert mock_uvicorn_run.call_args[1]["timeout_graceful_shutdown"] == 42
+
+    @patch("uvicorn.run")
+    @patch("builtins.print")
+    @patch("litellm.proxy.db.prisma_client.PrismaManager.setup_database")
+    def test_graceful_shutdown_timeout_zero_disables_cap(self, mock_setup_db, mock_print, mock_uvicorn_run):
+        """0 means wait indefinitely: the kwarg must be omitted, not passed as 0."""
+        from click.testing import CliRunner
+
+        from litellm.proxy.proxy_cli import run_server
+
+        runner = CliRunner()
+        mock_app = MagicMock()
+        mock_proxy_config = MagicMock()
+        mock_key_mgmt = MagicMock()
+        mock_save_worker_config = MagicMock()
+
+        clean_env = {k: v for k, v in os.environ.items() if k not in ("DATABASE_URL", "DIRECT_URL")}
+        with patch.dict(
+            os.environ, clean_env, clear=True,
+        ), patch.dict(
+            "sys.modules",
+            {
+                "proxy_server": MagicMock(
+                    app=mock_app,
+                    ProxyConfig=mock_proxy_config,
+                    KeyManagementSettings=mock_key_mgmt,
+                    save_worker_config=mock_save_worker_config,
+                )
+            },
+        ), patch(
+            "litellm.proxy.proxy_cli.ProxyInitializationHelpers._get_default_unvicorn_init_args"
+        ) as mock_get_args:
+            mock_get_args.return_value = {
+                "app": "litellm.proxy.proxy_server:app",
+                "host": "localhost",
+                "port": 8000,
+            }
+
+            result = runner.invoke(
+                run_server, ["--local", "--graceful_shutdown_timeout", "0"]
+            )
+
+            assert result.exit_code == 0, f"exit_code={result.exit_code}, output={result.output}"
+            mock_uvicorn_run.assert_called_once()
+            assert "timeout_graceful_shutdown" not in mock_uvicorn_run.call_args[1]
