@@ -152,9 +152,22 @@ class MCPRequestHandler:
                 else:
                     raise
         else:
-            validated_user_api_key_auth = await user_api_key_auth(
-                api_key=litellm_api_key, request=request
-            )
+            try:
+                validated_user_api_key_auth = await user_api_key_auth(
+                    api_key=litellm_api_key, request=request
+                )
+            except (ProxyException, HTTPException):
+                raise
+            except Exception as e:
+                # user_api_key_auth raises a plain Exception for missing or
+                # malformed keys on this early path. Surface it as 401 so public
+                # scanners hitting /mcp/* don't get a 500 (and no route leak).
+                raise ProxyException(
+                    message=str(e),
+                    type="auth_error",
+                    param="None",
+                    code="401",
+                ) from e
 
         return (
             validated_user_api_key_auth,

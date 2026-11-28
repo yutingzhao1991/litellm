@@ -50,6 +50,32 @@ from litellm.types.mcp_server.mcp_server_manager import MCPInfo, MCPServer
 from litellm.types.utils import CallTypes, StandardLoggingMCPToolCall
 from litellm.utils import Rules, client, function_setup
 
+
+def _mcp_error_status_code(exc: BaseException) -> int:
+    """
+    Preserve real HTTP status codes for MCP request failures.
+
+    Authentication/validation errors (``ProxyException`` and friends) carry a
+    ``status_code`` (401/403/...). Mapping them to 500 both hides the cause from
+    clients and leaks route existence to unauthenticated scanners, which hit
+    ``/mcp/*`` constantly. Only unknown exceptions stay 500.
+    """
+    # Starlette/FastAPI style exceptions carry ``status_code``.
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and 400 <= status_code <= 599:
+        return status_code
+    # LiteLLM's ProxyException maps the HTTP status onto ``code`` instead.
+    code = getattr(exc, "code", None)
+    if isinstance(code, (int, str)):
+        try:
+            parsed = int(code)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None and 400 <= parsed <= 599:
+            return parsed
+    return 500
+
+
 # Check if MCP is available
 # "mcp" requires python 3.10 or higher, but several litellm users use python 3.8
 # We're making this conditional import to avoid breaking users who use python 3.8.
@@ -2094,10 +2120,9 @@ if MCP_AVAILABLE:
             # Try to send a graceful error response for non-HTTP exceptions
             try:
                 from starlette.responses import JSONResponse
-                from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
 
                 error_response = JSONResponse(
-                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    status_code=_mcp_error_status_code(e),
                     content={"error": "MCP request failed", "details": str(e)},
                 )
                 await error_response(scope, receive, send)
@@ -2151,10 +2176,9 @@ if MCP_AVAILABLE:
             try:
                 # Send a proper HTTP error response instead of letting the exception bubble up
                 from starlette.responses import JSONResponse
-                from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
 
                 error_response = JSONResponse(
-                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    status_code=_mcp_error_status_code(e),
                     content={"error": "MCP request failed", "details": str(e)},
                 )
                 await error_response(scope, receive, send)
